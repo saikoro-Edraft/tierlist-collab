@@ -1,306 +1,459 @@
-import titleLogo from "../assets/title.png";
-import goodIcon from "../assets/good.png";
-import badIcon from "../assets/bad.png";
+﻿import titleLogo from "../assets/title.png";
+import { AXES, STATUS } from "../game/constants.js";
 
 export function el(tag, className, text) {
-  const n = document.createElement(tag);
-  if (className) n.className = className;
-  if (text != null) n.textContent = text;
-  return n;
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
 }
 
 export function mountToast() {
   const toasts = el("div", "toasts");
-  const toast = (type, msg) => {
-    const t = el("div", `toast toast--${type}`);
-    t.textContent = msg;
-    toasts.append(t);
-    setTimeout(() => t.remove(), 2800);
+  const toast = (type, message) => {
+    const item = el("div", `toast toast--${type}`, message);
+    toasts.append(item);
+    setTimeout(() => item.remove(), 3000);
   };
+
   window.__toast = {
-    success: (m) => toast("success", m),
-    error: (m) => toast("error", m),
+    success: (message) => toast("success", message),
+    error: (message) => toast("error", message),
   };
+
   return toasts;
 }
 
-export function renderParticipants(lpBody, currentUser, othersPresence, userNameBtn) {
-  // ?????????????????
-  lpBody.innerHTML = "";
+function renderHeader(onBackHome) {
+  const header = el("header", "header");
+  const left = el("div", "header__left");
+  const brand = el("button", "brand brand--button");
+  brand.type = "button";
+  brand.addEventListener("click", onBackHome);
 
-  const others = othersPresence
-    .map(other => other.user || other) // user ?????????????????
-    .filter(Boolean);
+  const brandImg = document.createElement("img");
+  brandImg.className = "brand__img";
+  brandImg.src = titleLogo;
+  brandImg.alt = "On Fire Game";
+  brand.append(brandImg);
 
-  if (!currentUser && others.length === 0) {
-    lpBody.append(el("div", "text-muted", "No participants"));
+  left.append(brand);
+
+  const right = el("div", "header__right");
+  const badge = el("span", "badge", "MVP");
+  right.append(badge);
+
+  header.append(left, right);
+  return header;
+}
+
+function renderConnectionBanner(connectionState) {
+  if (connectionState === "connected") return null;
+  const banner = el("div", "connection-banner");
+  banner.textContent = connectionState === "reconnecting" ? "再接続中..." : "接続待機中...";
+  return banner;
+}
+
+function renderHome(vm, handlers) {
+  const panel = el("section", "panel panel--narrow");
+  panel.append(el("div", "panel__head", "荒れるコメント作成ゲーム"));
+
+  const body = el("div", "panel__body");
+  body.append(el("p", "help", "実在個人攻撃・差別・脅迫・個人情報は失格です。"));
+
+  const createField = el("div", "field");
+  createField.append(el("label", "label", "表示名"));
+  const createNameInput = document.createElement("input");
+  createNameInput.className = "input";
+  createNameInput.value = vm.ui.homeName;
+  createNameInput.placeholder = "プレイヤー名";
+  createNameInput.addEventListener("input", (event) => handlers.onChangeUi("homeName", event.target.value));
+  createField.append(createNameInput);
+
+  const createBtn = el("button", "btn btn--primary btn--block", "ルーム作成");
+  createBtn.addEventListener("click", handlers.onCreateRoom);
+
+  const joinWrap = el("div", "home-join");
+  joinWrap.append(el("div", "lobby__divider", "または"));
+
+  const codeInput = document.createElement("input");
+  codeInput.className = "input";
+  codeInput.value = vm.ui.joinCode;
+  codeInput.placeholder = "ルームコード (例: A1B2C3)";
+  codeInput.addEventListener("input", (event) => handlers.onChangeUi("joinCode", event.target.value));
+
+  const joinNameInput = document.createElement("input");
+  joinNameInput.className = "input";
+  joinNameInput.value = vm.ui.joinName;
+  joinNameInput.placeholder = "表示名";
+  joinNameInput.addEventListener("input", (event) => handlers.onChangeUi("joinName", event.target.value));
+
+  const joinBtn = el("button", "btn btn--secondary btn--block", "ルーム参加");
+  joinBtn.addEventListener("click", handlers.onJoinRoom);
+
+  joinWrap.append(codeInput, joinNameInput, joinBtn);
+  body.append(createField, createBtn, joinWrap);
+  panel.append(body);
+  return panel;
+}
+
+function routeHint(vm) {
+  return vm.route.phase ? `/room/${vm.route.code}/${vm.route.phase}` : "/";
+}
+
+function renderPlayers(players, hostId) {
+  const wrap = el("div", "players-list");
+  players.forEach((player) => {
+    const row = el("div", "player-row");
+    const left = el("div", "player-row__left", player.name);
+    if (player.id === hostId) {
+      left.append(" (Host)");
+    }
+    const right = el("div", `player-state ${player.connected ? "is-online" : "is-offline"}`);
+    right.textContent = player.connected ? "online" : "offline";
+    row.append(left, right);
+    wrap.append(row);
+  });
+  return wrap;
+}
+
+function renderLobby(vm, handlers) {
+  const room = vm.room;
+  const isHost = vm.you?.isHost;
+
+  const shell = el("div", "shell shell--game");
+
+  const leftPanel = el("aside", "panel");
+  leftPanel.append(el("div", "panel__head", "参加者"));
+  const leftBody = el("div", "panel__body");
+  leftBody.append(renderPlayers(room.players, room.hostId));
+  leftPanel.append(leftBody);
+
+  const center = el("main", "panel");
+  center.append(el("div", "panel__head", `ルーム ${room.code} / Lobby`));
+  const centerBody = el("div", "panel__body");
+
+  const settings = el("div", "settings-grid");
+  const roundInput = document.createElement("input");
+  roundInput.type = "number";
+  roundInput.className = "input";
+  roundInput.min = "1";
+  roundInput.max = "10";
+  roundInput.value = String(vm.ui.roundCountDraft ?? room.settings.roundCount);
+  roundInput.disabled = !isHost;
+  roundInput.addEventListener("input", (event) => handlers.onChangeUi("roundCountDraft", event.target.value));
+
+  const timeInput = document.createElement("input");
+  timeInput.type = "number";
+  timeInput.className = "input";
+  timeInput.min = "15";
+  timeInput.max = "180";
+  timeInput.value = String(vm.ui.timeLimitDraft ?? room.settings.timeLimitSec);
+  timeInput.disabled = !isHost;
+  timeInput.addEventListener("input", (event) => handlers.onChangeUi("timeLimitDraft", event.target.value));
+
+  const topicInput = document.createElement("input");
+  topicInput.className = "input";
+  topicInput.placeholder = "お題を手入力で上書き (任意)";
+  topicInput.value = vm.ui.topicOverride || "";
+  topicInput.disabled = !isHost;
+  topicInput.addEventListener("input", (event) => handlers.onChangeUi("topicOverride", event.target.value));
+
+  const anonymousCheck = document.createElement("input");
+  anonymousCheck.type = "checkbox";
+  anonymousCheck.checked = vm.ui.anonymousDraft ?? room.settings.anonymous;
+  anonymousCheck.disabled = !isHost;
+  anonymousCheck.addEventListener("change", (event) => handlers.onChangeUi("anonymousDraft", event.target.checked));
+
+  const anonymousLabel = el("label", "check-label", "公開時に匿名表示");
+  anonymousLabel.prepend(anonymousCheck);
+
+  settings.append(el("label", "label", "ラウンド数"), roundInput);
+  settings.append(el("label", "label", "制限時間(秒)"), timeInput);
+  settings.append(el("label", "label", "お題上書き"), topicInput);
+
+  const actionRow = el("div", "actions-row");
+  if (isHost) {
+    const applyBtn = el("button", "btn btn--secondary", "設定保存");
+    applyBtn.addEventListener("click", handlers.onUpdateSettings);
+    const startBtn = el("button", "btn btn--primary", "ゲーム開始");
+    startBtn.addEventListener("click", handlers.onStartRound);
+    actionRow.append(applyBtn, startBtn);
+  }
+
+  centerBody.append(settings, anonymousLabel, actionRow);
+  center.append(centerBody);
+
+  const rightPanel = el("aside", "panel");
+  rightPanel.append(el("div", "panel__head", "ガイド"));
+  const rightBody = el("div", "panel__body");
+  rightBody.append(el("p", "help", "2〜8人推奨。投稿は時間内に何度でも上書きできます。"));
+  rightBody.append(el("p", "help", "採点は4軸で各1位を選択。自分には投票できません。"));
+  rightPanel.append(rightBody);
+
+  shell.append(leftPanel, center, rightPanel);
+  return shell;
+}
+
+function renderRound(vm, handlers) {
+  const room = vm.room;
+  const round = room.activeRound;
+  const meSubmission = round?.submissions?.find((submission) => submission.playerId === vm.you.id);
+  const submittedCount = round?.submittedCount || 0;
+
+  const panel = el("section", "panel");
+  panel.append(el("div", "panel__head", `Round ${round.roundNo} / WRITING`));
+
+  const body = el("div", "panel__body");
+  body.append(el("div", "topic-box", round.topicText));
+  body.append(el("p", "help", `提出済み: ${submittedCount}/${room.players.length}`));
+  body.append(el("p", "help", `残り時間: ${vm.roundTick.remainingSec ?? "--"}秒`));
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "input textarea";
+  textarea.maxLength = 280;
+  textarea.placeholder = "コメントを入力 (280文字以内)";
+  textarea.value = vm.ui.submissionText;
+  textarea.addEventListener("input", (event) => handlers.onChangeUi("submissionText", event.target.value));
+
+  const submitBtn = el("button", "btn btn--primary", "投稿を送信/更新");
+  submitBtn.addEventListener("click", handlers.onSubmitWriting);
+
+  body.append(textarea, submitBtn);
+
+  if (meSubmission?.submittedAt) {
+    const status = el("div", `submission-status ${meSubmission.isDisqualified ? "is-dq" : ""}`);
+    status.textContent = meSubmission.isDisqualified
+      ? `失格判定: ${meSubmission.dqReason}`
+      : "投稿済み (時間内は再編集可)";
+    body.append(status);
+  }
+
+  if (vm.you.isHost) {
+    const revealBtn = el("button", "btn btn--secondary", "ホストが一斉公開へ進める");
+    revealBtn.addEventListener("click", handlers.onForceReveal);
+    body.append(revealBtn);
+  }
+
+  panel.append(body);
+  return panel;
+}
+
+function renderReveal(vm, handlers) {
+  const room = vm.room;
+  const round = room.activeRound;
+
+  const panel = el("section", "panel");
+  panel.append(el("div", "panel__head", `Round ${round.roundNo} / REVEAL`));
+
+  const body = el("div", "panel__body");
+  const list = el("div", "submission-grid");
+
+  round.submissions.forEach((submission, index) => {
+    const card = el("article", "submission-card");
+    const player = room.players.find((p) => p.id === submission.playerId);
+    const displayName = room.settings.anonymous ? `Player ${index + 1}` : player?.name || "Unknown";
+    card.append(el("div", "submission-card__head", displayName));
+
+    if (submission.isDisqualified) {
+      const masked = el("div", "dq-mask", "ライン越えで失格 (本文非表示)");
+      const reason = el("div", "help", submission.dqReason || "規約違反");
+      card.append(masked, reason);
+    } else {
+      card.append(el("div", "submission-card__text", submission.text || "(未提出)"));
+    }
+
+    list.append(card);
+  });
+
+  body.append(list);
+
+  if (vm.you.isHost) {
+    const nextBtn = el("button", "btn btn--primary", "採点フェーズへ");
+    nextBtn.addEventListener("click", handlers.onStartScoring);
+    body.append(nextBtn);
+  } else {
+    body.append(el("p", "help", "ホストの進行を待っています..."));
+  }
+
+  panel.append(body);
+  return panel;
+}
+
+function renderScore(vm, handlers) {
+  const room = vm.room;
+  const round = room.activeRound;
+
+  const panel = el("section", "panel");
+  panel.append(el("div", "panel__head", `Round ${round.roundNo} / SCORING`));
+  const body = el("div", "panel__body");
+
+  const votingTargets = round.submissions.filter((submission) => {
+    if (submission.playerId === vm.you.id) return false;
+    if (submission.isDisqualified) return false;
+    return true;
+  });
+
+  body.append(el("p", "help", `投票完了: ${round.votedCount || 0}/${round.totalVoters || room.players.length}`));
+
+  AXES.forEach((axis) => {
+    const field = el("div", "field");
+    field.append(el("label", "label", `${axis.label} (1位を選択)`));
+
+    const select = document.createElement("select");
+    select.className = "input";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "選択してください";
+    select.append(placeholder);
+
+    votingTargets.forEach((submission, index) => {
+      const option = document.createElement("option");
+      option.value = submission.playerId;
+      const player = room.players.find((p) => p.id === submission.playerId);
+      option.textContent = room.settings.anonymous
+        ? `Player ${index + 1}`
+        : player?.name || submission.playerId;
+      select.append(option);
+    });
+
+    select.value = vm.ui.votesDraft[axis.key] || "";
+    select.addEventListener("change", (event) => handlers.onVoteDraft(axis.key, event.target.value));
+    field.append(select);
+    body.append(field);
+  });
+
+  const submitVotesBtn = el("button", "btn btn--primary", "投票を送信");
+  submitVotesBtn.addEventListener("click", handlers.onSubmitVotes);
+  body.append(submitVotesBtn);
+
+  if (vm.you.isHost) {
+    const forceBtn = el("button", "btn btn--secondary", "ホストが結果を確定");
+    forceBtn.addEventListener("click", handlers.onFinalizeResult);
+    body.append(forceBtn);
+  }
+
+  panel.append(body);
+  return panel;
+}
+
+function buildRanking(vm) {
+  const room = vm.room;
+  const round = room.activeRound;
+  const scores = round?.scoresComputed?.bySubmissionPlayerId || {};
+
+  return room.players
+    .map((player) => {
+      const score = scores[player.id] || {
+        axisScores: {
+          NORM_CHALLENGE: 0,
+          LOGIC_LEAP: 0,
+          EMOTION_STIM: 0,
+          ARTISTRY: 0,
+        },
+        total: 0,
+        isDisqualified: false,
+        dqReason: null,
+      };
+      return {
+        player,
+        score,
+      };
+    })
+    .sort((a, b) => b.score.total - a.score.total);
+}
+
+function renderResult(vm, handlers) {
+  const room = vm.room;
+  const round = room.activeRound;
+  const ranking = buildRanking(vm);
+
+  const panel = el("section", "panel");
+  panel.append(el("div", "panel__head", `Round ${round.roundNo} / RESULT`));
+
+  const body = el("div", "panel__body");
+  const table = el("div", "result-table");
+
+  ranking.forEach(({ player, score }, index) => {
+    const row = el("div", `result-row ${score.isDisqualified ? "is-dq" : ""}`);
+    row.append(el("div", "result-rank", String(index + 1)));
+    row.append(el("div", "result-name", player.name));
+
+    AXES.forEach((axis) => {
+      row.append(el("div", "result-axis", `${axis.label}: ${score.axisScores?.[axis.key] ?? 0}`));
+    });
+
+    const totalLabel = score.isDisqualified
+      ? "失格 (0点)"
+      : `合計: ${score.total}`;
+    row.append(el("div", "result-total", totalLabel));
+    table.append(row);
+  });
+
+  body.append(table);
+
+  if (vm.you.isHost) {
+    if (room.currentRoundNo < room.settings.roundCount) {
+      const nextBtn = el("button", "btn btn--primary", "次ラウンドへ");
+      nextBtn.addEventListener("click", handlers.onNextRound);
+      body.append(nextBtn);
+    } else {
+      body.append(el("p", "help", "最終ラウンドが完了しました。"));
+    }
+  } else {
+    body.append(el("p", "help", "ホストの進行を待っています..."));
+  }
+
+  panel.append(body);
+  return panel;
+}
+
+function resolvePhase(roomStatus, routePhase) {
+  if (routePhase) return routePhase;
+  if (!roomStatus) return "lobby";
+  if (roomStatus === STATUS.LOBBY) return "lobby";
+  if (roomStatus === STATUS.WRITING) return "round";
+  if (roomStatus === STATUS.REVEAL) return "reveal";
+  if (roomStatus === STATUS.SCORING) return "score";
+  if (roomStatus === STATUS.RESULT || roomStatus === STATUS.ENDED) return "result";
+  return "lobby";
+}
+
+export function renderGameApp(root, vm, handlers) {
+  const app = el("div", "app");
+  app.append(renderHeader(handlers.onBackHome));
+
+  const banner = renderConnectionBanner(vm.connectionState);
+  if (banner) app.append(banner);
+
+  const container = el("div", "container");
+
+  if (!vm.room) {
+    container.append(renderHome(vm, handlers));
+    app.append(container);
+    app.append(mountToast());
+    root.replaceChildren(app);
     return;
   }
 
-  const renderOne = (participant) => {
-    if (!participant) return;
-    const participantEl = el("div", "participant");
+  const phase = resolvePhase(vm.room.status, vm.route.phase);
+  const routeLabel = el("div", "route-hint", `Route: ${routeHint(vm)} (${phase})`);
+  container.append(routeLabel);
 
-    const avatar = el("div", "participant__avatar");
-    const initial = (participant.displayName?.[0] || "?").toUpperCase();
-    avatar.textContent = initial;
-
-    // userId ?????????????????
-    if (!participant.userId) {
-      console.warn("[render] participant missing userId:", participant);
-      return;
-    }
-
-    avatar.style.backgroundColor = hashColor(participant.userId);
-
-    const info = el("div", "participant__info");
-    const name = el("div", "participant__name", participant.displayName || "Guest");
-    info.append(name);
-
-    if (participant.draggingCardId) {
-      const status = el("div", "participant__status", `?? Dragging card`);
-      info.append(status);
-    }
-
-    participantEl.append(avatar, info);
-    lpBody.append(participantEl);
-  };
-
-  // Order: current user -> change button -> others
-  renderOne(currentUser);
-  if (userNameBtn) {
-    const btnWrap = el("div", "participant-actions");
-    btnWrap.append(userNameBtn);
-    lpBody.append(btnWrap);
+  if (phase === "lobby") {
+    container.append(renderLobby(vm, handlers));
+  } else if (phase === "round") {
+    container.append(renderRound(vm, handlers));
+  } else if (phase === "reveal") {
+    container.append(renderReveal(vm, handlers));
+  } else if (phase === "score") {
+    container.append(renderScore(vm, handlers));
+  } else {
+    container.append(renderResult(vm, handlers));
   }
-  for (const participant of others) {
-    renderOne(participant);
-  }
-}
 
-export function renderTemplateButtons(container, templates, onApply, onReset) {
-  container.innerHTML = "";
-
-  const grid = el("div", "template-grid");
-  templates.forEach((template) => {
-    const btn = el("button", "btn btn--secondary btn--template", template.label);
-    btn.type = "button";
-    btn.addEventListener("click", () => onApply(template.id));
-    grid.append(btn);
-  });
-
-  const resetBtn = el("button", "btn btn--ghost btn--template template-reset", "Reset");
-  resetBtn.type = "button";
-  resetBtn.addEventListener("click", onReset);
-
-  container.append(grid, resetBtn);
-  return { resetBtn };
-}
-
-export function renderLobby(root) {
-  const app = el("div", "app");
-
-  const header = el("header", "header");
-  const left = el("div", "header__left");
-  const brand = el("div", "brand");
-  const brandImg = document.createElement("img");
-  brandImg.className = "brand__img";
-  brandImg.src = titleLogo;
-  brandImg.alt = "TierList Collab";
-  brand.append(brandImg);
-  left.append(brand);
-  header.append(left);
-
-  const container = el("div", "container");
-  const lobby = el("div", "lobby");
-  const panel = el("div", "panel lobby__panel");
-
-  const head = el("div", "panel__head", "Welcome");
-  const body = el("div", "panel__body");
-  body.append(el("div", "lobby__title", "ルームを作成 / 参加"));
-  body.append(el("div", "help", "サーバ側の存在チェックは行いません。入力IDが新規作成になる場合があります。"));
-
-  const createBtn = el("button", "btn btn--primary lobby__btn", "ルームを作成");
-
-  const divider = el("div", "lobby__divider", "または");
-
-  const joinWrap = el("div", "lobby__join");
-  const input = document.createElement("input");
-  input.className = "input";
-  input.placeholder = "room_abc12345";
-  joinWrap.append(input);
-
-  const joinBtn = el("button", "btn btn--secondary lobby__btn", "ルームに参加");
-  joinWrap.append(joinBtn);
-
-  body.append(createBtn, divider, joinWrap);
-  panel.append(head, body);
-  lobby.append(panel);
-  container.append(lobby);
-
-  app.append(header, container);
+  app.append(container);
+  app.append(mountToast());
   root.replaceChildren(app);
-
-  return { createBtn, joinBtn, input };
-}
-
-function hashColor(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 70%, 60%)`;
-}
-
-export function renderLayout(root, { onShare, onShareRoomId, enableUserRename }) {
-  const app = el("div", "app");
-
-  const header = el("header", "header");
-  const left = el("div", "header__left");
-  const brand = el("div", "brand");
-  const brandImg = document.createElement("img");
-  brandImg.className = "brand__img";
-  brandImg.src = titleLogo;
-  brandImg.alt = "TierList Collab";
-  brand.append(brandImg);
-  left.append(brand);
-  const right = el("div", "header__right");
-  const shareBtn = el("button", "btn btn--primary");
-  shareBtn.textContent = "Share URL";
-  shareBtn.addEventListener("click", onShare);
-  const shareRoomBtn = el("button", "btn btn--secondary");
-  shareRoomBtn.textContent = "Share Room ID";
-  shareRoomBtn.addEventListener("click", onShareRoomId);
-  right.append(shareBtn, shareRoomBtn);
-  header.append(left, right);
-
-  const container = el("div", "container");
-  const shell = el("div", "shell");
-
-  const leftPanel = el("aside", "panel panel--left");
-  leftPanel.append(el("div", "panel__head", "Participants"));
-  const lpBody = el("div", "panel__body");
-  lpBody.append(el("div", "", "Guest-local"));
-  leftPanel.append(lpBody);
-  leftPanel.append(el("div", "panel__head", "Room Info"));
-  const info = el("div", "panel__body");
-  info.append(
-    el("div", "", "Phase4。"),
-    el("div", "help", "外部urlのSS未対応。")
-  );
-  leftPanel.append(info);
-  leftPanel.append(el("div", "panel__head", "Templates"));
-  const templatesBody = el("div", "panel__body");
-  leftPanel.append(templatesBody);
-
-  let userNameBtn = null;
-  if (enableUserRename) {
-    userNameBtn = el("button", "btn btn--secondary");
-    userNameBtn.textContent = "Change My Name";
-  }
-
-  const mainPanel = el("main", "panel");
-  const mainHead = el("div", "panel__head");
-  mainHead.style.display = "flex";
-  mainHead.style.justifyContent = "space-between";
-  mainHead.style.alignItems = "center";
-  const mainTitle = el("div", "");
-  mainHead.append(mainTitle);
-  
-  const headActions = el("div");
-  headActions.style.display = "flex";
-  headActions.style.gap = "8px";
-  
-  const changeNameBtn = el("button", "btn btn--secondary");
-  changeNameBtn.textContent = "Name Change";
-  changeNameBtn.style.fontSize = "13px";
-  changeNameBtn.style.padding = "6px 12px";
-  headActions.append(changeNameBtn);
-  
-  const addTierBtn = el("button", "btn btn--secondary");
-  addTierBtn.textContent = "Add Tier";
-  addTierBtn.style.fontSize = "13px";
-  addTierBtn.style.padding = "6px 12px";
-  headActions.append(addTierBtn);
-  
-  const addCardBtn = el("button", "btn btn--secondary");
-  addCardBtn.textContent = "Add Card";
-  addCardBtn.style.fontSize = "13px";
-  addCardBtn.style.padding = "6px 12px";
-  headActions.append(addCardBtn);
-
-  const exportBtn = el("button", "btn btn--secondary");
-  exportBtn.textContent = "Export PNG";
-  right.append(exportBtn);
-  
-  mainHead.append(headActions);
-  mainPanel.append(mainHead);
-  const mainBody = el("div", "panel__body");
-  mainPanel.append(mainBody);
-
-  const rightPanel = el("aside", "panel vote-panel");
-  rightPanel.append(el("div", "panel__head", "VOTE"));
-  const voteBody = el("div", "panel__body vote-panel__body");
-  const voteSlot = el("div", "vote-slot");
-  const voteImg = document.createElement("img");
-  voteImg.className = "vote-slot__img";
-  voteImg.alt = "";
-  voteImg.referrerPolicy = "no-referrer";
-  voteImg.loading = "lazy";
-  voteImg.decoding = "async";
-  voteImg.draggable = false;
-  voteSlot.append(voteImg);
-  const voteTitle = el("div", "vote-slot__title", "No card");
-
-  const voteButtons = el("div", "vote-buttons");
-  const goodBtn = el("button", "vote-btn");
-  const goodImg = document.createElement("img");
-  goodImg.src = goodIcon;
-  goodImg.alt = "Good";
-  goodBtn.append(goodImg);
-  const goodCount = el("div", "vote-count", "0");
-
-  const badBtn = el("button", "vote-btn");
-  const badImg = document.createElement("img");
-  badImg.src = badIcon;
-  badImg.alt = "Bad";
-  badBtn.append(badImg);
-  const badCount = el("div", "vote-count", "0");
-
-  const goodWrap = el("div", "vote-group");
-  goodWrap.append(goodBtn, goodCount);
-  const badWrap = el("div", "vote-group");
-  badWrap.append(badBtn, badCount);
-  voteButtons.append(goodWrap, badWrap);
-
-  voteBody.append(voteSlot, voteTitle, voteButtons);
-  rightPanel.append(voteBody);
-
-  shell.append(leftPanel, mainPanel, rightPanel);
-  container.append(shell);
-
-  app.append(header, container);
-  root.replaceChildren(app);
-
-  return {
-    app,
-    mainBody,
-    mainTitle,
-    changeNameBtn,
-    addCardBtn,
-    addTierBtn,
-    exportBtn,
-    lpBody,
-    templatesBody,
-    userNameBtn,
-    voteSlot,
-    voteImg,
-    voteTitle,
-    goodBtn,
-    badBtn,
-    goodCount,
-    badCount,
-  };
 }

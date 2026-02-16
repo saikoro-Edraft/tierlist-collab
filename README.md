@@ -1,59 +1,106 @@
-# TierList Collab
+﻿# 荒れるコメント作成ゲーム MVP
 
-Vite + Liveblocks + Yjs で動くコラボ TierList アプリです。
+既存の Vite フロント資産（ヘッダー/共通パネル/ホーム導線）を流用し、
+`ルーム作成 -> ラウンド進行 -> 同時投稿 -> 一斉公開 -> 4軸採点 -> 結果表示` までを実装した MVP です。
 
-## できること
-- Lobby 画面からルーム作成/参加
-- ルームは `#room/<roomId>` で遷移
-- Tier / Card の追加・編集・削除・移動
-- Backlog（`t_backlog`）は最下段固定・移動不可・グレー
-- Tier 色は `src/main.js` の `renderBoard()` で HSL 0→120
-- テンプレ適用/リセット（confirm あり）
-- 投票機能（`t_vote` にカードを移動）
-  - vote セッションは `voteSessionId` で管理
-  - 右パネルに good/bad ボタン＆集計表示
-- スクリーンショット書き出し（PNG）
-  - ボードのみ対象／Backlog 除外
-  - ボタン・操作UI・「ここにドロップ」を除去
-  - タイトル（リスト名）を上部に追加
-  - 外部画像は CORS 次第で写らない場合あり
-- 参加者の名前変更（自分の表示名のみ）
+## 実装範囲
+- ルーム作成 / 参加（6桁コード）
+- ロビーでホスト設定
+  - ラウンド数（デフォルト 3）
+  - 制限時間（デフォルト 60 秒）
+  - 匿名公開 ON/OFF
+  - お題上書き（任意）
+- ラウンド進行（サーバ主導タイマー）
+- 投稿（時間内上書き可、他人投稿は公開まで非表示）
+- 一斉公開（時間切れ or ホスト手動）
+- 4軸プレイヤー採点（自分以外を各軸1位）
+- 集計（1票 = 10点、軸合算）
+- 結果表示（軸別/合計/失格）
+- 次ラウンド進行 / ラウンド終了
 
-## 開発環境
+## ライン越え判定（簡易）
+投稿受理時にサーバで簡易判定します。
+
+判定対象（config で差し替え可）:
+- 電話番号 / 住所らしき表現
+- 脅迫語
+- 差別語
+- 露骨な罵倒語
+
+挙動:
+- ライン越えは `isDisqualified=true`
+- reveal で本文をマスク表示
+- result で失格（0点）表示
+
+設定ファイル:
+- `server/moderation-config.js`
+
+## 技術構成
+- Frontend: Vite + Vanilla JS
+- Realtime: Socket.IO
+- Backend: Node + Express + Socket.IO
+- Data: メモリ保持（再起動で消える）
+
+## 起動手順
+1. 依存インストール
 ```bash
 npm install
+```
+
+2. クライアント + サーバ同時起動
+```bash
 npm run dev
 ```
 
-.env.example をコピーして、 .env.local を作成し、liveblocksのapiキーを入力します。
-ローカル開発では適当な値でも動きますが、他の人と同期した編集はできません。
+3. アクセス
+- クライアント: `http://localhost:5173`
+- サーバ: `http://localhost:8787`
 
+## ルーティング
+ハッシュルーティングで MVP 画面を表現しています。
 
-ブラウザで `http://localhost:5173` を開きます。  
-例: `http://localhost:5173/#room/room_xxxxx`
+- `#/` : ホーム（作成/参加）
+- `#/room/:code/lobby`
+- `#/room/:code/round`
+- `#/room/:code/reveal`
+- `#/room/:code/score`
+- `#/room/:code/result`
 
-## テンプレ画像の管理
-`src/assets/templates/` を一括読み込みしています。  
-`src/templates/templates.js` の `img("file_name")` で参照します。
+## データモデル（メモリ）
+- Room
+  - `code, hostId, status`
+  - `settings: { roundCount, timeLimitSec, anonymous }`
+  - `players: [{ id, token, name, joinedAt, socketId, connected }]`
+  - `rounds: Round[]`
+- Round
+  - `roundNo, topicText, status, startedAt, deadlineTs`
+  - `submissions: [{ playerId, text, submittedAt, isDisqualified, dqReason }]`
+  - `votes: [{ voterId, axis, submissionPlayerId }]`
+  - `scoresComputed: { bySubmissionPlayerId: { axisScores, total, isDisqualified, dqReason } }`
 
-## CSP / セキュリティ
-- 画像URLは http/https のみ許可（data: はユーザー入力で拒否）
-- `index.html` の CSP（meta）で `img-src` に `data:` を許可  
-  （html2canvas の内部データURI対策）
+## Socket.IO イベント仕様
+### Client -> Server
+- `room:create { name }`
+- `room:join { code, name, playerToken? }`
+- `room:getState { code }`
+- `room:updateSettings { code, settings }`
+- `round:start { code, topicOverride? }`
+- `submission:update { code, text }`
+- `round:reveal { code }`
+- `scoring:start { code }`
+- `scoring:submitVotes { code, votes }`
+- `result:finalize { code }`
+- `round:next { code, topicOverride? }`
 
-## ディレクトリ構成
-```
-src/
-  main.js                  # メインロジック
-  ui/render.js             # レイアウト/ヘッダ/投票パネル
-  realtime/
-    provider.js            # Liveblocks + Yjs
-    yjs-bridge.js          # Yjs state 操作
-    presence.js            # Presence 定義
-  templates/templates.js   # テンプレ定義
-  styles/app.css           # UI スタイル
-  assets/                  # 画像
-```
+### Server -> Client
+- `room:state`
+- `round:tick { roundNo, remainingSec, deadlineTs, nowTs }`
+- `submission:updated { roundNo, submittedCount, totalPlayers }`
+- `reveal:ready { roundNo, reason }`
+- `vote:updated { roundNo, votedCount, totalVoters }`
+- `result:ready { roundNo, scoresComputed }`
 
-## デプロイ
-- GitHub Pages: `docs/DEPLOY_GITHUB_PAGES.md`
+## 補足
+- AI 採点 / AI お題生成は未実装（将来拡張用にフロント・サーバ責務を分離）
+- MVP のため DB 未使用（プロセス再起動でルーム消失）
+- 再接続時は `localStorage` のトークンで同一プレイヤー復帰を試行

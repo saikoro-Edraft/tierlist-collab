@@ -1,1282 +1,391 @@
-import "./styles/app.css";
-import "./debug.js";
-
-import * as Y from "yjs";
-import html2canvas from "html2canvas";
-import { setGlobalYdoc } from "./state/store.js";
-import { sanitizeImageUrl } from "./state/model.js";
-import { ydocToState, applyActionToYdoc } from "./realtime/yjs-bridge.js";
-import { connectRoom } from "./realtime/provider.js";
-import { getDefaultPresence, updatePresence, subscribeToPresence } from "./realtime/presence.js";
-import { el, mountToast, renderLayout, renderParticipants, renderTemplateButtons, renderLobby } from "./ui/render.js";
-import { getTemplates, getTemplateState, getResetState } from "./templates/templates.js";
-
-let state = null;
-let currentRoom = null;
-let currentYdoc = null;
-let currentRoomId = null;
-let presenceUnsubscribe = null;
-let currentUser = null;
-let othersPresence = [];
-let participantsBody = null;
-let voteUI = null;
-let currentVoteCardId = null;
-let currentVoteSessionId = null;
-let currentUserNameBtn = null;
-
-const ENABLE_USER_RENAME = true;
-
-function getSafeImageUrl(url) {
-  return sanitizeImageUrl(url);
-}
-
-function getVoteTier() {
-  return state?.tiers?.find((tier) => tier.id === "t_vote") || null;
-}
-
-function getVoteCardId() {
-  const voteTier = getVoteTier();
-  return Array.isArray(voteTier?.cardIds) ? voteTier.cardIds[0] || null : null;
-}
-
-function findCardTierId(cardId) {
-  if (!state?.tiers) return null;
-  const tier = state.tiers.find((t) => Array.isArray(t.cardIds) && t.cardIds.includes(cardId));
-  return tier ? tier.id : null;
-}
-
-function moveCardToTier(cardId, toTierId) {
-  const fromTierId = findCardTierId(cardId);
-  if (!fromTierId) return false;
-  const toTier = state.tiers.find((t) => t.id === toTierId);
-  const toIndex = Array.isArray(toTier?.cardIds) ? toTier.cardIds.length : 0;
-  safeApplyAction("moveCard", { cardId, fromTierId, toTierId, toIndex });
-  return true;
-}
-
-function renderParticipantsNow() {
-  if (!participantsBody) return;
-  renderParticipants(participantsBody, currentUser, othersPresence, currentUserNameBtn);
-}
-
-/**
- * Yjs Doc に対してアクションを実行（エラーハンドリング付き）
- */
-function safeApplyAction(actionName, params) {
-  try {
-    if (!currentYdoc) {
-      console.warn(`[main] safeApplyAction: currentYdoc not available for ${actionName}`);
-      return;
-    }
-    console.log(`[main] Executing action: ${actionName}`, params);
-    applyActionToYdoc(currentYdoc, actionName, params);
-    console.log(`[main] Action executed successfully: ${actionName}`);
-    
-    // アクション実行後、Yjs Doc の内容を state に反映
-    state = ydocToState(currentYdoc);
-    // Yjs の更新は自動的に Liveblocks に同期される（LiveblocksYjsProvider経由）
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[main] Error executing action ${actionName}:`, errorMsg);
-    window.__toast?.error(`操作に失敗しました: ${errorMsg}`);
-  }
-}
-
-/**
- * ルームに接続
- */
-async function connectToRoom(roomId) {
-  try {
-    console.log("[main] connectToRoom: Connecting to room:", roomId);
-    // 既存の接続を切断
-    if (presenceUnsubscribe) {
-      presenceUnsubscribe();
-    }
-
-    // 新しいルームに接続
-    console.log("[main] connectToRoom: Calling connectRoom()");
-    const { room, ydoc } = await connectRoom(roomId);
-    console.log("[main] connectToRoom: Got room and ydoc");
-    currentRoom = room;
-    currentYdoc = ydoc;
-    currentRoomId = roomId;
-
-    // グローバル Yjs Doc を設定
-    setGlobalYdoc(ydoc);
-    console.log("[main] connectToRoom: setGlobalYdoc done");
-
-    // 初期状態をロード
-    console.log("[main] connectToRoom: Loading state from ydoc");
-    state = ydocToState(ydoc);
-    console.log("[main] connectToRoom: State loaded:", state);
-    if (!state.tiers?.some((t) => t.id === "t_vote")) {
-      safeApplyAction("ensureVoteTier", {});
-    }
-
-    // Presence の初期化
-    console.log("[main] connectToRoom: Initializing presence");
-    const presence = getDefaultPresence();
-    currentUser = presence;
-    updatePresence(room, presence);
-    console.log("[main] connectToRoom: Presence updated");
-
-    // Presence リスナー設定
-    console.log("[main] connectToRoom: Setting presence listener");
-    presenceUnsubscribe = subscribeToPresence(room, (others) => {
-      console.log("[main] Presence updated, others:", others.length);
-    othersPresence = others;
-    renderParticipantsNow();
-    updateVoteUI();
-  });
-    console.log("[main] connectToRoom: Presence listener set");
-
-    // Yjs Doc の変更をリッスン
-    console.log("[main] connectToRoom: Setting Yjs doc listener");
-    ydoc.on("update", () => {
-      console.log("[main] Yjs Doc updated");
-      state = ydocToState(ydoc);
-      renderApp();
-    });
-
-    console.log("[main] connectToRoom: Room connection established");
-    return true;
-  } catch (error) {
-    console.error("[main] connectToRoom: Error:", error);
-    window.__toast?.error("ルーム接続に失敗しました");
-    return false;
-  }
-}
-
-/**
- * 現在のルームを取得
- */
-function getRoomId() {
-  const hash = window.location.hash;
-  if (hash.startsWith("#room/")) {
-    return hash.slice(6);
-  }
-  return null;
-}
-
-/**
- * ルームIDを変更（URL更新）
- */
-function setRoomId(roomId) {
-  window.location.hash = `#room/${roomId}`;
-}
-
-function onShare() {
-  navigator.clipboard
-    .writeText(window.location.href)
-    .then(() => window.__toast?.success("コピーしました"))
-    .catch(() => window.__toast?.error("コピーに失敗しました"));
-}
-
-function onShareRoomId() {
-  const roomId = getRoomId();
-  if (!roomId) {
-    window.__toast?.error("ルームIDが見つかりません");
-    return;
-  }
-  navigator.clipboard
-    .writeText(roomId)
-    .then(() => window.__toast?.success("ルームIDをコピーしました"))
-    .catch(() => window.__toast?.error("コピーに失敗しました"));
-}
-function applyTemplateById(templateId) {
-  const state = getTemplateState(templateId);
-  if (!state) {
-    window.__toast?.error("Template not found.");
-    return;
-  }
-  const ok = window.confirm("テンプレートを読み込みます。現在の内容は上書きされますがよろしいですか？");
-  if (!ok) return;
-  safeApplyAction("applyTemplate", { state });
-  window.__toast?.success("Template applied.");
-}
-
-function resetTemplate() {
-  const ok = window.confirm("リセットします。現在の内容は上書きされますがよろしいですか？");
-  if (!ok) return;
-  const state = getResetState();
-  safeApplyAction("applyTemplate", { state });
-  window.__toast?.success("Reset done.");
-}
-
-function newVoteSessionId() {
-  return `vs_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function resetVoteSession() {
-  const sessionId = newVoteSessionId();
-  safeApplyAction("setVoteSession", { sessionId });
-  if (currentRoom && currentUser) {
-    const newPresence = { ...currentUser, vote: null, voteSessionId: sessionId };
-    currentUser = newPresence;
-    updatePresence(currentRoom, newPresence);
-  }
-  currentVoteSessionId = sessionId;
-  updateVoteUI();
-}
-
-function setVoteCard(cardId) {
-  if (!state) return;
-  const voteTier = getVoteTier();
-  const currentCardId = getVoteCardId();
-  if (currentCardId === cardId) return;
-
-  // If there is already a vote card, move it back to backlog.
-  if (currentCardId) {
-    moveCardToTier(currentCardId, "t_backlog");
-  }
-
-  if (cardId) {
-    moveCardToTier(cardId, "t_vote");
-  }
-
-  resetVoteSession();
-}
-
-function updateVoteUI() {
-  if (!voteUI || !state) return;
-  const {
-    voteSlot,
-    voteImg,
-    voteTitle,
-    goodBtn,
-    badBtn,
-    goodCount,
-    badCount,
-  } = voteUI;
-
-  const cardId = getVoteCardId();
-  const card = cardId ? state.cards[cardId] : null;
-  const hasCard = !!card;
-
-  if (hasCard) {
-    voteSlot.classList.remove("is-empty");
-    const safeUrl = getSafeImageUrl(card.imageUrl);
-    if (safeUrl) {
-      voteImg.style.display = "block";
-      voteImg.src = safeUrl;
-    } else {
-      voteImg.style.display = "none";
-      voteImg.src = "";
-    }
-    voteTitle.textContent = card.title || "";
-    voteSlot.draggable = true;
-    voteSlot.dataset.cardId = cardId;
-  } else {
-    voteSlot.classList.add("is-empty");
-    voteImg.style.display = "none";
-    voteImg.src = "";
-    voteTitle.textContent = "No card";
-    voteSlot.draggable = false;
-    voteSlot.dataset.cardId = "";
-  }
-
-  goodBtn.disabled = !hasCard;
-  badBtn.disabled = !hasCard;
-
-  const all = [currentUser, ...othersPresence.map((o) => o.user || o)].filter(Boolean);
-  const sessionId = state.voteSessionId || null;
-  const likeCount = hasCard
-    ? all.filter((u) => u.vote === "like" && u.voteSessionId === sessionId).length
-    : 0;
-  const badCountValue = hasCard
-    ? all.filter((u) => u.vote === "dislike" && u.voteSessionId === sessionId).length
-    : 0;
-  goodCount.textContent = String(likeCount);
-  badCount.textContent = String(badCountValue);
-
-  const voteValue = currentUser?.vote || null;
-  goodBtn.classList.toggle("is-active", voteValue === "like");
-  badBtn.classList.toggle("is-active", voteValue === "dislike");
-}
-
-
-/**
- * シンプルなモーダル（CSSは既存の .modal-backdrop / .modal を使用）
- * - Escで閉じる
- * - 背景クリックで閉じる
- */
-function openModal({ title, contentNode, primaryText, onPrimary, secondaryText = "Cancel" }) {
-  const backdrop = el("div", "modal-backdrop");
-  const modal = el("div", "modal");
-
-  const head = el("div", "modal__head");
-  head.append(el("div", "modal__title", title));
-  const closeBtn = el("button", "iconbtn");
-  closeBtn.textContent = "✕";
-  head.append(closeBtn);
-
-  const body = el("div", "modal__body");
-  body.append(contentNode);
-
-  const foot = el("div", "modal__foot");
-  const cancel = el("button", "btn btn--ghost");
-  cancel.textContent = secondaryText;
-
-  const ok = el("button", "btn btn--primary");
-  ok.textContent = primaryText;
-
-  foot.append(cancel, ok);
-  modal.append(head, body, foot);
-  backdrop.append(modal);
-  document.body.append(backdrop);
-
-  const cleanup = () => {
-    window.removeEventListener("keydown", onKey);
-    backdrop.remove();
-  };
-
-  let allowBackdropClose = false;
-  modal.addEventListener("pointerdown", () => {
-    allowBackdropClose = false;
-  });
-  backdrop.addEventListener("pointerdown", (e) => {
-    allowBackdropClose = e.target === backdrop;
-  });
-
-  const onKey = (e) => {
-    if (e.key === "Escape") cleanup();
-  };
-  window.addEventListener("keydown", onKey);
-
-  backdrop.addEventListener("click", (e) => {
-    if (e.target !== backdrop) return;
-    if (!allowBackdropClose) return;
-    const selection = window.getSelection?.();
-    if (selection && selection.type === "Range") {
-      allowBackdropClose = false;
-      return;
-    }
-    cleanup();
-  });
-
-  closeBtn.addEventListener("click", cleanup);
-  cancel.addEventListener("click", cleanup);
-
-  ok.addEventListener("click", async () => {
-    const res = await onPrimary();
-    // onPrimary側が false を返したら閉じない（入力エラーなど）
-    if (res === false) return;
-    cleanup();
-  });
-
-  return { close: cleanup };
-}
-
-/** ドロップ位置（挿入index）を決める */
-function computeDropIndex({ tier, tierBodyEl, event }) {
-  const cardIds = Array.isArray(tier?.cardIds) ? tier.cardIds : [];
-  const targetCardEl = event.target?.closest?.(".card");
-  if (!targetCardEl || !tierBodyEl.contains(targetCardEl)) {
-    return cardIds.length; // 末尾
-  }
-
-  const targetId = targetCardEl.dataset.cardId;
-  const baseIndex = cardIds.indexOf(targetId);
-  if (baseIndex === -1) return cardIds.length;
-
-  const rect = targetCardEl.getBoundingClientRect();
-  const before = event.clientY < rect.top + rect.height / 2;
-  return before ? baseIndex : baseIndex + 1;
-}
-
-function getDragCardId(event) {
-  if (!event?.dataTransfer) return "";
-  return (
-    event.dataTransfer.getData("application/x-tier-card") ||
-    event.dataTransfer.getData("text/plain") ||
-    ""
-  );
-}
-
-function cardNode(card, { showImage = true } = {}) {
-  const cardEl = el("div", "card");
-  if (!showImage) {
-    cardEl.classList.add("card--text-only");
-  }
-  cardEl.draggable = true;
-  cardEl.dataset.cardId = card.id;
-
-  cardEl.addEventListener("dragstart", (e) => {
-    e.dataTransfer.setData("application/x-tier-card", card.id);
-    e.dataTransfer.setData("text/plain", card.id);
-    e.dataTransfer.effectAllowed = "move";
-
-    // Presence?????????
-    if (currentRoom && currentUser) {
-      const newPresence = {
-        ...currentUser,
-        draggingCardId: card.id,
-      };
-      currentUser = newPresence;
-      updatePresence(currentRoom, newPresence);
-      renderParticipantsNow();
-      console.log("[main] Drag started:", card.id);
-    }
-  });
-
-  cardEl.addEventListener("dragend", (e) => {
-    // ????????? draggingCardId ????
-    console.log("[main] dragend fired for card:", card.id, "current dragging:", currentUser?.draggingCardId);
-    if (currentRoom && currentUser) {
-      // ??????????drop?????????????
-      setTimeout(() => {
-        if (currentUser.draggingCardId === card.id) {
-          const newPresence = {
-            ...currentUser,
-            draggingCardId: null,
-          };
-          currentUser = newPresence;
-          updatePresence(currentRoom, newPresence);
-          renderParticipantsNow();
-          console.log("[main] draggingCardId cleared via dragend");
-        }
-      }, 0);
-    }
-  });
-
-  const title = el("div", "card__title", card.title);
-  const actions = el("div", "card__actions");
-  const editBtn = el("button", "card__btn");
-  editBtn.textContent = "✏️";
-  editBtn.title = "Edit Card";
-  editBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    showEditCardModal(card);
-  });
-
-  const delBtn = el("button", "card__btn");
-  delBtn.textContent = "🗑️";
-  delBtn.title = "Delete Card";
-  delBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    showDeleteCardModal(card);
-  });
-
-  actions.append(editBtn, delBtn);
-
-  if (showImage) {
-    // ????????????
-    const imageContainer = el("div", "card__image-container");
-    const safeUrl = getSafeImageUrl(card.imageUrl);
-  
-    if (safeUrl) {
-      const img = document.createElement("img");
-      img.className = "card__thumb";
-      img.src = safeUrl;
-      img.alt = "";
-      img.referrerPolicy = "no-referrer";
-      img.loading = "lazy";
-      img.decoding = "async";
-      img.draggable = false;
-      img.addEventListener("error", () => {
-        img.remove();
-        const errorEl = el("div", "card__error", "画像を読み込めませんでした");
-        imageContainer.append(errorEl);
-      });
-      imageContainer.append(img);
-    }
-  
-    imageContainer.append(actions);
-    const footer = el("div", "card__footer");
-    footer.append(title);
-    cardEl.append(imageContainer, footer);
-  } else {
-    const header = el("div", "card__header");
-    header.append(actions, title);
-    cardEl.append(header);
-  }
-  return cardEl;
-}
-
-function showAddTierModal() {
-  const wrap = el("div");
-  const field = el("div", "field");
-  field.append(el("div", "label", "Tier name (1〜24文字)"));
-  const input = document.createElement("input");
-  input.className = "input";
-  input.placeholder = "例: C";
-  field.append(input);
-
-  const err = el("div", "error");
-  wrap.append(field, err);
-
-  openModal({
-    title: "Add Tier",
-    contentNode: wrap,
-    primaryText: "Add",
-    onPrimary: () => {
-      err.textContent = "";
-      const name = (input.value ?? "").trim();
-      if (!name || name.length > 24) {
-        err.textContent = "Tier名は1〜24文字で入力してください。";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      // Yjs Doc に適用
-      safeApplyAction("addTier", { name });
-
-      window.__toast?.success("Tierを追加しました");
-      return true;
-    },
-  });
-
-  // 即入力できるように
-  setTimeout(() => input.focus(), 0);
-}
-
-function showRenameTierModal(tier) {
-  const wrap = el("div");
-  const field = el("div", "field");
-  field.append(el("div", "label", "Tier name (1〜24文字)"));
-  const input = document.createElement("input");
-  input.className = "input";
-  input.value = tier.name;
-  field.append(input);
-
-  const err = el("div", "error");
-  wrap.append(field, err);
-
-  openModal({
-    title: "Rename Tier",
-    contentNode: wrap,
-    primaryText: "Save",
-    onPrimary: () => {
-      err.textContent = "";
-      const name = (input.value ?? "").trim();
-      if (!name || name.length > 24) {
-        err.textContent = "Tier名は1〜24文字で入力してください。";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      safeApplyAction("renameTier", { tierId: tier.id, name });
-
-      window.__toast?.success("Tier名を更新しました");
-      return true;
-    },
-  });
-
-  setTimeout(() => input.focus(), 0);
-}
-
-function showDeleteTierModal(tier) {
-  const wrap = el("div");
-  wrap.append(
-    el("div", "", `「${tier.name}」を削除します。`),
-    el("div", "help", "このTier内のカードは Backlog の末尾に移動します。")
-  );
-
-  openModal({
-    title: "Delete Tier",
-    contentNode: wrap,
-    primaryText: "Delete",
-    onPrimary: () => {
-      if (tier.id === "t_backlog") {
-        window.__toast?.error("Backlogは削除できません。");
-        return false;
-      }
-
-      safeApplyAction("deleteTier", { tierId: tier.id });
-
-      window.__toast?.success("Tierを削除しました（カードはBacklogへ移動）");
-      return true;
-    },
-    secondaryText: "Cancel",
-  });
-}
-
-function showEditCardModal(card) {
-  const wrap = el("div");
-  
-  const titleField = el("div", "field");
-  titleField.append(el("div", "label", "Title (required)"));
-  const titleInput = document.createElement("input");
-  titleInput.className = "input";
-  titleInput.value = card.title;
-  titleField.append(titleInput);
-
-  const urlField = el("div", "field");
-  urlField.append(el("div", "label", "Image URL (optional)"));
-  const urlInput = document.createElement("input");
-  urlInput.className = "input";
-  urlInput.value = card.imageUrl ?? "";
-  urlInput.placeholder = "https://...";
-  urlField.append(urlInput);
-  urlField.append(el("div", "help", "http/httpsのみ。空白で画像を削除します。"));
-
-  const err = el("div", "error");
-  wrap.append(titleField, urlField, err);
-
-  openModal({
-    title: "Edit Card",
-    contentNode: wrap,
-    primaryText: "Save",
-    onPrimary: () => {
-      err.textContent = "";
-      const title = (titleInput.value ?? "").trim();
-      if (!title) {
-        err.textContent = "タイトルは必須です。";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      const imageUrl = urlInput.value;
-      const safeUrl = imageUrl ? getSafeImageUrl(imageUrl) : null;
-      if (imageUrl && !safeUrl) {
-        err.textContent = "Image URL は http/https のみ許可しています";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      safeApplyAction("updateCard", { cardId: card.id, title, imageUrl: safeUrl });
-
-      window.__toast?.success("カードを更新しました");
-      return true;
-    },
-  });
-
-  setTimeout(() => titleInput.focus(), 0);
-}
-
-function showChangeListNameModal() {
-  const wrap = el("div");
-  const field = el("div", "field");
-  field.append(el("div", "label", "List Name (1〜50文字)"));
-  const input = document.createElement("input");
-  input.className = "input";
-  input.value = state.listName;
-  field.append(input);
-
-  const err = el("div", "error");
-  wrap.append(field, err);
-
-  openModal({
-    title: "Change List Name",
-    contentNode: wrap,
-    primaryText: "Save",
-    onPrimary: () => {
-      err.textContent = "";
-      const listName = (input.value ?? "").trim();
-      if (!listName || listName.length > 50) {
-        err.textContent = "リスト名は1〜50文字で入力してください。";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      safeApplyAction("updateListName", { listName });
-
-      window.__toast?.success("リスト名を更新しました");
-      return true;
-    },
-  });
-
-  setTimeout(() => input.focus(), 0);
-}
-
-function showChangeUserNameModal() {
-  if (!currentRoom || !currentUser) return;
-
-  const wrap = el("div");
-  const field = el("div", "field");
-  field.append(el("div", "label", "Your Name (1〜24)"));
-  const input = document.createElement("input");
-  input.className = "input";
-  input.value = currentUser.displayName || "";
-  field.append(input);
-
-  const err = el("div", "error");
-  wrap.append(field, err);
-
-  openModal({
-    title: "Change My Name",
-    contentNode: wrap,
-    primaryText: "Save",
-    onPrimary: () => {
-      err.textContent = "";
-      const name = (input.value ?? "").trim();
-      if (!name || name.length > 24) {
-        err.textContent = "名前は1〜24文字で入力してください";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      const newPresence = { ...currentUser, displayName: name };
-      currentUser = newPresence;
-      updatePresence(currentRoom, newPresence);
-      renderParticipantsNow();
-      window.__toast?.success("名前を更新しました");
-      return true;
-    },
-  });
-
-  setTimeout(() => input.focus(), 0);
-}
-
-function showAddCardModal() {
-  const wrap = el("div");
-  
-  const titleField = el("div", "field");
-  titleField.append(el("div", "label", "Title (required)"));
-  const titleInput = document.createElement("input");
-  titleInput.className = "input";
-  titleInput.placeholder = "例: Ashe";
-  titleField.append(titleInput);
-
-  const urlField = el("div", "field");
-  urlField.append(el("div", "label", "Image URL (optional)"));
-  const urlInput = document.createElement("input");
-  urlInput.className = "input";
-  urlInput.placeholder = "https://...";
-  urlField.append(urlInput);
-  urlField.append(el("div", "help", "http/httpsのみ。読み込み失敗時はフォールバックします。"));
-
-  const err = el("div", "error");
-  wrap.append(titleField, urlField, err);
-
-  openModal({
-    title: "Add Card",
-    contentNode: wrap,
-    primaryText: "Add",
-    onPrimary: () => {
-      err.textContent = "";
-      const title = (titleInput.value ?? "").trim();
-      if (!title) {
-        err.textContent = "タイトルは必須です。";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      const imageUrl = urlInput.value;
-      const safeUrl = imageUrl ? getSafeImageUrl(imageUrl) : null;
-      if (imageUrl && !safeUrl) {
-        err.textContent = "Image URL は http/https のみ許可しています";
-        window.__toast?.error(err.textContent);
-        return false;
-      }
-
-      safeApplyAction("addCard", { title, imageUrl: safeUrl });
-
-      window.__toast?.success("カードを追加しました");
-      return true;
-    },
-  });
-
-  setTimeout(() => titleInput.focus(), 0);
-}
-
-function showDeleteCardModal(card) {
-  const wrap = el("div");
-  wrap.append(
-    el("div", "", `「${card.title}」を削除します。`)
-  );
-
-  openModal({
-    title: "Delete Card",
-    contentNode: wrap,
-    primaryText: "Delete",
-    onPrimary: () => {
-      safeApplyAction("deleteCard", { cardId: card.id });
-
-      window.__toast?.success("カードを削除しました");
-      return true;
-    },
-    secondaryText: "Cancel",
-  });
-}
-
-function renderBoard(mainBody) {
-  if (!state) {
-    console.warn("[main] renderBoard: state is null");
-    return;
-  }
-
-  console.log("[main] renderBoard: state =", state);
-  console.log("[main] renderBoard: tiers =", state.tiers);
-
-  try {
-    const board = el("div", "board");
-
-    const backlogTier = state.tiers.find((tier) => tier.id === "t_backlog");
-    const orderedTiers = [
-      ...state.tiers.filter((tier) => tier.id !== "t_backlog" && tier.id !== "t_vote"),
-      ...(backlogTier ? [backlogTier] : []),
-    ];
-    const colorTiers = orderedTiers.filter((tier) => tier.id !== "t_backlog");
-    const totalTiers = Math.max(1, colorTiers.length);
-    const tierColor = (index) => {
-      if (totalTiers === 1) return "hsl(0, 85%, 70%)";
-      const ratio = index / (totalTiers - 1);
-      const hue = 0 + (120 * ratio);
-      return `hsl(${hue}, 85%, 70%)`;
+﻿import "./styles/app.css";
+import { io } from "socket.io-client";
+import { AXES, STATUS } from "./game/constants.js";
+import { renderGameApp } from "./ui/render.js";
+
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:8787";
+
+const PHASE_BY_STATUS = {
+  [STATUS.LOBBY]: "lobby",
+  [STATUS.WRITING]: "round",
+  [STATUS.REVEAL]: "reveal",
+  [STATUS.SCORING]: "score",
+  [STATUS.RESULT]: "result",
+  [STATUS.ENDED]: "result",
+};
+
+const state = {
+  route: parseHash(),
+  connectionState: "connecting",
+  room: null,
+  you: null,
+  roundTick: {
+    remainingSec: null,
+    deadlineTs: null,
+    nowTs: null,
+  },
+  ui: {
+    homeName: "",
+    joinCode: "",
+    joinName: "",
+    topicOverride: "",
+    submissionText: "",
+    roundCountDraft: null,
+    timeLimitDraft: null,
+    anonymousDraft: null,
+    votesDraft: Object.fromEntries(AXES.map((axis) => [axis.key, ""])),
+  },
+};
+
+const root = document.getElementById("app");
+const socket = io(SOCKET_URL, {
+  autoConnect: true,
+  transports: ["websocket", "polling"],
+  reconnection: true,
+});
+
+function parseHash() {
+  const hash = window.location.hash.replace(/^#/, "") || "/";
+  const parts = hash.split("/").filter(Boolean);
+  if (parts.length >= 2 && parts[0] === "room") {
+    return {
+      code: (parts[1] || "").toUpperCase(),
+      phase: parts[2] || "lobby",
     };
-    const showImages = Object.values(state.cards || {}).some((card) => !!getSafeImageUrl(card?.imageUrl));
+  }
+  return {
+    code: null,
+    phase: null,
+  };
+}
 
-    let colorIndex = 0;
-    orderedTiers.forEach((tier) => {
-      const tierEl = el("section", "tier");
-      tierEl.dataset.tierId = tier.id;
-      if (!Array.isArray(tier.cardIds)) {
-        tier.cardIds = [];
-      }
+function setHashRoute(code, phase) {
+  const next = code ? `#/room/${code}/${phase}` : "#/";
+  if (window.location.hash === next) return;
+  window.location.hash = next;
+}
 
-    const label = el("div", "tier__label");
-    const isBacklog = tier.id === "t_backlog";
-    if (isBacklog) {
-      label.style.background = "#8a8f98";
-    } else {
-      label.style.background = tierColor(colorIndex);
-      colorIndex += 1;
-    }
-    const name = el("div", "tier__label-name", tier.name);
-    const actions = el("div", "tier__actions");
+function tokenKey(code) {
+  return `on_fire_game_token_${code}`;
+}
 
-    // 上移動（Backlogは移動不可）
-    const upBtn = el("button", "iconbtn");
-    upBtn.textContent = "↑";
-    upBtn.title = "Move Up";
-    upBtn.disabled = isBacklog;
-    upBtn.style.opacity = isBacklog ? "0.35" : "1";
-    upBtn.style.cursor = isBacklog ? "not-allowed" : "pointer";
-    if (!isBacklog) {
-      upBtn.addEventListener("click", () => {
-        safeApplyAction("moveTierUp", { tierId: tier.id });
-        window.__toast?.success("Tierを移動しました");
-      });
-    }
+function nameKey(code) {
+  return `on_fire_game_name_${code}`;
+}
 
-    // 下移動（Backlogは移動不可）
-    const downBtn = el("button", "iconbtn");
-    downBtn.textContent = "↓";
-    downBtn.title = "Move Down";
-    const isLastNonBacklog = !isBacklog && orderedTiers[orderedTiers.length - 1]?.id === "t_backlog";
-    const isJustAboveBacklog = !isBacklog && orderedTiers[orderedTiers.length - 2]?.id === tier.id;
-    const downDisabled = isBacklog || (isLastNonBacklog && isJustAboveBacklog);
-    downBtn.disabled = downDisabled;
-    downBtn.style.opacity = downDisabled ? "0.35" : "1";
-    downBtn.style.cursor = downDisabled ? "not-allowed" : "pointer";
-    if (!downDisabled) {
-      downBtn.addEventListener("click", () => {
-        safeApplyAction("moveTierDown", { tierId: tier.id });
-        window.__toast?.success("Tierを移動しました");
-      });
-    }
+function getStoredToken(code) {
+  if (!code) return null;
+  return window.localStorage.getItem(tokenKey(code));
+}
 
-    // 編集
-    const editBtn = el("button", "iconbtn");
-    editBtn.textContent = "✎";
-    editBtn.title = "Rename Tier";
-    editBtn.addEventListener("click", () => showRenameTierModal(tier));
+function setStoredAuth(code, token, name) {
+  if (!code || !token) return;
+  window.localStorage.setItem(tokenKey(code), token);
+  if (name) {
+    window.localStorage.setItem(nameKey(code), name);
+  }
+}
 
-    // 削除（Backlogは削除不可）
-    const delBtn = el("button", "iconbtn");
-    delBtn.textContent = "🗑";
-    delBtn.title = "Delete Tier";
-    delBtn.disabled = isBacklog;
-    delBtn.style.opacity = isBacklog ? "0.35" : "1";
-    delBtn.style.cursor = isBacklog ? "not-allowed" : "pointer";
-    if (!isBacklog) {
-      delBtn.addEventListener("click", () => showDeleteTierModal(tier));
-    }
+function getStoredName(code) {
+  if (!code) return "";
+  return window.localStorage.getItem(nameKey(code)) || "";
+}
 
-    actions.append(upBtn, downBtn, editBtn, delBtn);
-    label.append(name, actions);
-
-    const body = el("div", "tier__body");
-    body.dataset.tierId = tier.id;
-
-    body.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+function rpc(event, payload) {
+  return new Promise((resolve) => {
+    socket.emit(event, payload, (response) => {
+      resolve(response || { ok: false, message: "サーバ応答がありません" });
     });
+  });
+}
 
-    body.addEventListener("drop", (e) => {
-      e.preventDefault();
+function ensureRoutePhaseByRoom() {
+  if (!state.room?.code) return;
+  const expectedPhase = PHASE_BY_STATUS[state.room.status] || "lobby";
+  if (state.route.code !== state.room.code || state.route.phase !== expectedPhase) {
+    setHashRoute(state.room.code, expectedPhase);
+  }
+}
 
-      const cardId = getDragCardId(e);
-      if (!cardId) return;
+function syncDraftFromRoom() {
+  if (!state.room) return;
 
-      const fromTier = state.tiers.find((t) => t.cardIds.includes(cardId));
-      if (!fromTier) return;
+  if (state.ui.roundCountDraft == null) {
+    state.ui.roundCountDraft = state.room.settings.roundCount;
+  }
+  if (state.ui.timeLimitDraft == null) {
+    state.ui.timeLimitDraft = state.room.settings.timeLimitSec;
+  }
+  if (state.ui.anonymousDraft == null) {
+    state.ui.anonymousDraft = state.room.settings.anonymous;
+  }
 
-      const toTierId = tier.id;
-      const fromTierId = fromTier.id;
-
-      let toIndex = computeDropIndex({ tier, tierBodyEl: body, event: e });
-
-      // 同一Tier内移動のindexズレ補正
-      if (fromTierId === toTierId) {
-        const fromIndex = tier.cardIds.indexOf(cardId);
-        if (fromIndex !== -1 && fromIndex < toIndex) toIndex -= 1;
-      }
-
-      safeApplyAction("moveCard", { cardId, fromTierId, toTierId, toIndex });
-      if (fromTierId === "t_vote" || toTierId === "t_vote") {
-        resetVoteSession();
-      }
-      console.log("[main] Drop completed for card:", cardId);
-    });
-
-    if (tier.cardIds.length === 0) {
-      body.append(el("div", "drop-hint", "ここにドロップ"));
-    } else {
-      for (const cid of tier.cardIds) {
-        const c = state.cards[cid];
-        if (!c) continue;
-        const safeUrl = getSafeImageUrl(c.imageUrl);
-        body.append(cardNode({ ...c, imageUrl: safeUrl }, { showImage: showImages }));
-      }
+  if (state.room.activeRound) {
+    const mySubmission = state.room.activeRound.submissions?.find(
+      (submission) => submission.playerId === state.you?.id,
+    );
+    if (mySubmission && state.room.status === STATUS.WRITING) {
+      state.ui.submissionText = mySubmission.text || "";
     }
+  }
+}
 
-    tierEl.append(label, body);
-    board.append(tierEl);
+function render() {
+  if (!root) return;
+  renderGameApp(root, state, handlers);
+}
+
+async function attemptJoinFromRoute() {
+  const route = state.route;
+  if (!route.code) return;
+  const token = getStoredToken(route.code);
+  const name = state.ui.joinName || getStoredName(route.code) || state.ui.homeName || "Guest";
+
+  const res = await rpc("room:join", {
+    code: route.code,
+    name,
+    playerToken: token,
   });
 
-    mainBody.replaceChildren(board);
-    requestAnimationFrame(() => {
-      board.querySelectorAll(".card__title").forEach((title) => {
-        const cardEl = title.closest(".card");
-        const clampLines = 1;
-        const style = window.getComputedStyle(title);
-        const lineHeight = Number.parseFloat(style.lineHeight) ||
-          Number.parseFloat(style.fontSize) * 1.3;
-
-        const prevDisplay = title.style.display;
-        const prevOverflow = title.style.overflow;
-        const prevClamp = title.style.webkitLineClamp;
-        const prevOrient = title.style.webkitBoxOrient;
-
-        title.style.display = "block";
-        title.style.overflow = "visible";
-        title.style.webkitLineClamp = "unset";
-        title.style.webkitBoxOrient = "initial";
-
-        const naturalHeight = title.scrollHeight;
-
-        title.style.display = prevDisplay;
-        title.style.overflow = prevOverflow;
-        title.style.webkitLineClamp = prevClamp;
-        title.style.webkitBoxOrient = prevOrient;
-
-        const isOverflowing = naturalHeight > (lineHeight * clampLines) + 1;
-        title.classList.toggle("card__title--compact", isOverflowing);
-      });
-    });
-    console.log("[main] renderBoard: completed successfully");
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error("[main] renderBoard error:", errorMsg);
-    console.error("[main] renderBoard error details:", error);
-    mainBody.replaceChildren(el("div", "", `Error rendering board: ${errorMsg}`));
-  }
-}
-
-function renderApp() {
-  try {
-    console.log("[main] renderApp: starting, state =", state);
-    
-    const root = document.getElementById("app");
-    if (!root) {
-      console.error('No #app element found. Check index.html for <div id="app"></div>.');
-      return;
-    }
-
-    if (!state) {
-      root.textContent = "ルームを読み込み中...";
-      return;
-    }
-
-    const {
-      mainBody,
-      mainTitle,
-      changeNameBtn,
-      addCardBtn,
-      addTierBtn,
-      exportBtn,
-      userNameBtn,
-      lpBody,
-      templatesBody,
-      voteSlot,
-      voteImg,
-      voteTitle,
-      goodBtn,
-      badBtn,
-      goodCount,
-      badCount,
-    } = renderLayout(root, { onShare, onShareRoomId, enableUserRename: ENABLE_USER_RENAME });
-
-    currentUserNameBtn = userNameBtn;
-
-    // 参加者リストを描画
-    participantsBody = lpBody;
-    renderParticipantsNow();
-
-    const templates = getTemplates();
-    renderTemplateButtons(templatesBody, templates, applyTemplateById, resetTemplate);
-
-    voteUI = { voteSlot, voteImg, voteTitle, goodBtn, badBtn, goodCount, badCount };
-
-    const nextVoteCardId = getVoteCardId();
-    if (currentVoteCardId !== nextVoteCardId || currentVoteSessionId !== state.voteSessionId) {
-      currentVoteCardId = nextVoteCardId;
-      currentVoteSessionId = state.voteSessionId || null;
-      if (currentRoom && currentUser) {
-        const newPresence = {
-          ...currentUser,
-          vote: null,
-          voteSessionId: currentVoteSessionId,
-        };
-        currentUser = newPresence;
-        updatePresence(currentRoom, newPresence);
-      }
-    }
-
-    voteSlot.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-    });
-    voteSlot.addEventListener("dragstart", (e) => {
-      const cardId = getVoteCardId();
-      if (!cardId) {
-        e.preventDefault();
-        return;
-      }
-      e.dataTransfer.setData("application/x-tier-card", cardId);
-      e.dataTransfer.setData("text/plain", cardId);
-      e.dataTransfer.effectAllowed = "move";
-      voteSlot.classList.add("is-over");
-    });
-    voteSlot.addEventListener("dragend", () => {
-      voteSlot.classList.remove("is-over");
-    });
-    voteSlot.addEventListener("dragenter", (e) => {
-      e.preventDefault();
-      voteSlot.classList.add("is-over");
-    });
-    voteSlot.addEventListener("dragleave", () => {
-      voteSlot.classList.remove("is-over");
-    });
-    voteSlot.addEventListener("drop", (e) => {
-      e.preventDefault();
-      voteSlot.classList.remove("is-over");
-      const cardId = getDragCardId(e);
-      if (!cardId) return;
-      if (!state.cards[cardId]) {
-        window.__toast?.error("カードが見つかりません");
-        return;
-      }
-      setVoteCard(cardId);
-    });
-
-    goodBtn.addEventListener("click", () => {
-      if (!getVoteCardId() || !currentRoom || !currentUser) return;
-      const next = currentUser.vote === "like" ? null : "like";
-      const newPresence = {
-        ...currentUser,
-        vote: next,
-        voteSessionId: state.voteSessionId || null,
-      };
-      currentUser = newPresence;
-      updatePresence(currentRoom, newPresence);
-      updateVoteUI();
-    });
-
-    badBtn.addEventListener("click", () => {
-      if (!getVoteCardId() || !currentRoom || !currentUser) return;
-      const next = currentUser.vote === "dislike" ? null : "dislike";
-      const newPresence = {
-        ...currentUser,
-        vote: next,
-        voteSessionId: state.voteSessionId || null,
-      };
-      currentUser = newPresence;
-      updatePresence(currentRoom, newPresence);
-      updateVoteUI();
-    });
-
-    // タイトル更新（空欄の場合はデフォルト値）
-    mainTitle.textContent = state.listName || "Tier list";
-
-    // ボタンイベント設定
-    changeNameBtn.addEventListener("click", showChangeListNameModal);
-    addCardBtn.addEventListener("click", showAddCardModal);
-    addTierBtn.addEventListener("click", showAddTierModal);
-    exportBtn.addEventListener("click", () => exportBoardImage(mainBody));
-    if (userNameBtn) {
-      userNameBtn.addEventListener("click", showChangeUserNameModal);
-    }
-
-    const toasts = mountToast();
-    root.querySelector(".app").append(toasts);
-
-    renderBoard(mainBody);
-    updateVoteUI();
-    console.log("[main] renderApp: completed successfully");
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error("[main] renderApp error:", errorMsg);
-    console.error("[main] renderApp error details:", error);
-  }
-}
-
-async function exportBoardImage(mainBody) {
-  try {
-    const board = mainBody?.querySelector?.(".board");
-    if (!board) {
-      window.__toast?.error("ボードが見つかりません");
-      return;
-    }
-
-    const clone = board.cloneNode(true);
-    const backlog = clone.querySelector?.('[data-tier-id="t_backlog"]');
-    if (backlog) backlog.remove();
-
-    // Remove buttons and controls from the exported image
-    clone
-      .querySelectorAll(".card__actions, .tier__actions, .iconbtn, button")
-      .forEach((el) => el.remove());
-    clone.querySelectorAll(".drop-hint").forEach((el) => el.remove());
-
-    // Replace <img> with background images to preserve aspect ratio in html2canvas
-    clone.querySelectorAll(".card__image-container img").forEach((img) => {
-      const src = img.getAttribute("src") || "";
-      const box = document.createElement("div");
-      box.style.width = "100%";
-      box.style.height = "100%";
-      box.style.backgroundImage = `url("${src}")`;
-      box.style.backgroundRepeat = "no-repeat";
-      box.style.backgroundPosition = "center";
-      box.style.backgroundSize = "contain";
-      img.replaceWith(box);
-    });
-
-    const wrapper = document.createElement("div");
-    wrapper.style.display = "flex";
-    wrapper.style.flexDirection = "column";
-    wrapper.style.gap = "8px";
-    wrapper.style.padding = "12px";
-    wrapper.style.background = "rgba(17,26,51,0.72)";
-    wrapper.style.border = "1px solid rgba(255,255,255,0.10)";
-    wrapper.style.borderRadius = "12px";
-
-    const title = document.createElement("div");
-    title.textContent = state?.listName || "Tier list";
-    title.style.fontSize = "16px";
-    title.style.fontWeight = "600";
-    title.style.color = "rgba(255,255,255,0.92)";
-
-    wrapper.append(title, clone);
-
-    const staging = document.createElement("div");
-    staging.style.position = "fixed";
-    staging.style.left = "-10000px";
-    staging.style.top = "0";
-    staging.style.padding = "0";
-    staging.style.background = "transparent";
-    staging.append(wrapper);
-    document.body.append(staging);
-
-    const canvas = await html2canvas(staging, {
-      backgroundColor: null,
-      useCORS: true,
-      scale: 2,
-    });
-
-    staging.remove();
-
-    const name = (state?.listName || "tierlist").replace(/[\\/:*?"<>|]/g, "_");
-    const filename = `${name}.png`;
-
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        window.__toast?.error("画像の生成に失敗しました");
-        return;
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-      window.__toast?.success("画像を書き出しました");
-    });
-  } catch (e) {
-    console.error("[export] failed:", e);
-    window.__toast?.error("画像の書き出しに失敗しました");
-  }
-}
-
-/**
- * 初期化とルーティング
- */
-async function initApp() {
-  console.log("[main] initApp started");
-  // ルームIDを取得
-  let roomId = getRoomId();
-  console.log("[main] Current roomId:", roomId);
-
-  if (!roomId) {
-    const root = document.getElementById("app");
-    if (!root) return;
-    const { createBtn, joinBtn, input } = renderLobby(root);
-
-    const toasts = mountToast();
-    root.querySelector(".app").append(toasts);
-
-    const goToRoom = (id) => {
-      const trimmed = (id || "").trim();
-      if (!trimmed) {
-        window.__toast?.error("ルームIDを入力してください");
-        return;
-      }
-      setRoomId(trimmed);
-    };
-
-    createBtn.addEventListener("click", () => {
-      const newId = `room_${Math.random().toString(36).slice(2, 10)}`;
-      console.log("[main] Generated new roomId:", newId);
-      setRoomId(newId);
-    });
-
-    joinBtn.addEventListener("click", () => goToRoom(input.value));
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") goToRoom(input.value);
-    });
-
-    return;
-  }
-
-  // ルームに接続
-  console.log("[main] Connecting to room:", roomId);
-  const connected = await connectToRoom(roomId);
-  console.log("[main] Connection result:", connected);
-  
-  if (!connected) {
-    const root = document.getElementById("app");
-    if (root) {
-      root.textContent = "ルーム接続に失敗しました。ページをリロードしてください。";
+  if (!res.ok) {
+    if (window.__toast) {
+      window.__toast.error(res.message || "ルーム参加に失敗しました");
     }
     return;
   }
 
-  // 初回レンダリング
-  console.log("[main] Rendering app");
-  renderApp();
+  setStoredAuth(route.code, res.playerToken, name);
 }
 
-// アプリを起動
-initApp();
-
-// ハッシュ変更時にリロード（無限ループ防止用に1回限りに）
-let hashChangeHandled = false;
-window.addEventListener("hashchange", () => {
-  if (!hashChangeHandled) {
-    hashChangeHandled = true;
-    location.reload();
+socket.on("connect", async () => {
+  state.connectionState = "connected";
+  render();
+  if (state.route.code) {
+    await attemptJoinFromRoute();
   }
 });
+
+socket.on("disconnect", () => {
+  state.connectionState = "reconnecting";
+  render();
+});
+
+socket.on("reconnect_attempt", () => {
+  state.connectionState = "reconnecting";
+  render();
+});
+
+socket.on("room:state", (roomState) => {
+  state.room = roomState;
+  state.you = roomState.you;
+  syncDraftFromRoom();
+  ensureRoutePhaseByRoom();
+  render();
+});
+
+socket.on("round:tick", (payload) => {
+  state.roundTick = payload;
+  render();
+});
+
+socket.on("submission:updated", () => {
+  render();
+});
+
+socket.on("vote:updated", () => {
+  render();
+});
+
+socket.on("reveal:ready", () => {
+  if (window.__toast) window.__toast.success("一斉公開に進みました");
+});
+
+socket.on("result:ready", () => {
+  if (window.__toast) window.__toast.success("結果を表示します");
+});
+
+window.addEventListener("hashchange", async () => {
+  state.route = parseHash();
+  if (!state.route.code) {
+    state.room = null;
+    state.you = null;
+    state.ui.votesDraft = Object.fromEntries(AXES.map((axis) => [axis.key, ""]));
+    render();
+    return;
+  }
+
+  if (!state.room || state.room.code !== state.route.code) {
+    await attemptJoinFromRoute();
+  }
+
+  render();
+});
+
+const handlers = {
+  onBackHome: () => {
+    state.route = { code: null, phase: null };
+    state.room = null;
+    state.you = null;
+    state.ui.submissionText = "";
+    state.ui.votesDraft = Object.fromEntries(AXES.map((axis) => [axis.key, ""]));
+    setHashRoute(null, null);
+    render();
+  },
+  onChangeUi: (field, value) => {
+    state.ui[field] = value;
+  },
+  onVoteDraft: (axisKey, playerId) => {
+    state.ui.votesDraft[axisKey] = playerId;
+  },
+  onCreateRoom: async () => {
+    const name = (state.ui.homeName || "Guest").trim() || "Guest";
+    const res = await rpc("room:create", { name });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "ルーム作成に失敗しました");
+      return;
+    }
+    setStoredAuth(res.roomCode, res.playerToken, name);
+    setHashRoute(res.roomCode, "lobby");
+    state.route = parseHash();
+    state.ui.joinCode = res.roomCode;
+    state.ui.joinName = name;
+    render();
+  },
+  onJoinRoom: async () => {
+    const code = (state.ui.joinCode || "").trim().toUpperCase();
+    const name = (state.ui.joinName || "Guest").trim() || "Guest";
+    if (!code) {
+      window.__toast?.error("ルームコードを入力してください");
+      return;
+    }
+
+    const res = await rpc("room:join", {
+      code,
+      name,
+      playerToken: getStoredToken(code),
+    });
+
+    if (!res.ok) {
+      window.__toast?.error(res.message || "ルーム参加に失敗しました");
+      return;
+    }
+
+    setStoredAuth(code, res.playerToken, name);
+    setHashRoute(code, "lobby");
+    state.route = parseHash();
+    render();
+  },
+  onUpdateSettings: async () => {
+    if (!state.room) return;
+    const payload = {
+      roundCount: Number(state.ui.roundCountDraft || state.room.settings.roundCount),
+      timeLimitSec: Number(state.ui.timeLimitDraft || state.room.settings.timeLimitSec),
+      anonymous: Boolean(state.ui.anonymousDraft),
+    };
+    const res = await rpc("room:updateSettings", {
+      code: state.room.code,
+      settings: payload,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "設定更新に失敗しました");
+      return;
+    }
+    window.__toast?.success("設定を更新しました");
+  },
+  onStartRound: async () => {
+    if (!state.room) return;
+    const res = await rpc("round:start", {
+      code: state.room.code,
+      topicOverride: state.ui.topicOverride,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "ラウンド開始に失敗しました");
+      return;
+    }
+    state.ui.submissionText = "";
+    state.ui.votesDraft = Object.fromEntries(AXES.map((axis) => [axis.key, ""]));
+  },
+  onSubmitWriting: async () => {
+    if (!state.room) return;
+    const res = await rpc("submission:update", {
+      code: state.room.code,
+      text: state.ui.submissionText,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "投稿に失敗しました");
+      return;
+    }
+    if (res.isDisqualified) {
+      window.__toast?.error(`失格判定: ${res.dqReason || "規約違反"}`);
+    } else {
+      window.__toast?.success("投稿を更新しました");
+    }
+  },
+  onForceReveal: async () => {
+    if (!state.room) return;
+    const res = await rpc("round:reveal", {
+      code: state.room.code,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "公開に失敗しました");
+    }
+  },
+  onStartScoring: async () => {
+    if (!state.room) return;
+    const res = await rpc("scoring:start", {
+      code: state.room.code,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "採点開始に失敗しました");
+    }
+  },
+  onSubmitVotes: async () => {
+    if (!state.room) return;
+    const missing = AXES.some((axis) => !state.ui.votesDraft[axis.key]);
+    if (missing) {
+      window.__toast?.error("4軸すべて選択してください");
+      return;
+    }
+    const res = await rpc("scoring:submitVotes", {
+      code: state.room.code,
+      votes: state.ui.votesDraft,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "投票送信に失敗しました");
+      return;
+    }
+    window.__toast?.success("投票を送信しました");
+  },
+  onFinalizeResult: async () => {
+    if (!state.room) return;
+    const res = await rpc("result:finalize", {
+      code: state.room.code,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "結果確定に失敗しました");
+    }
+  },
+  onNextRound: async () => {
+    if (!state.room) return;
+    const res = await rpc("round:next", {
+      code: state.room.code,
+      topicOverride: state.ui.topicOverride,
+    });
+    if (!res.ok) {
+      window.__toast?.error(res.message || "次ラウンド開始に失敗しました");
+      return;
+    }
+    state.ui.submissionText = "";
+    state.ui.votesDraft = Object.fromEntries(AXES.map((axis) => [axis.key, ""]));
+  },
+};
+
+state.ui.homeName = getStoredName(state.route.code) || "";
+state.ui.joinCode = state.route.code || "";
+state.ui.joinName = getStoredName(state.route.code) || "";
+
+render();
+
+if (state.route.code) {
+  attemptJoinFromRoute();
+}
