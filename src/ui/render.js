@@ -1,4 +1,4 @@
-﻿import titleLogo from "../assets/title.png";
+import titleLogo from "../assets/title_line.png";
 import { AXES, STATUS } from "../game/constants.js";
 
 export function el(tag, className, text) {
@@ -130,7 +130,13 @@ function renderLobby(vm, handlers) {
   leftPanel.append(leftBody);
 
   const center = el("main", "panel");
-  center.append(el("div", "panel__head", `ルーム ${room.code} / Lobby`));
+  const centerHead = el("div", "panel__head");
+  const roomCodeBtn = el("button", "room-code-btn", `ルーム ${room.code}（クリックでルームコードをコピー）`);
+  roomCodeBtn.type = "button";
+  roomCodeBtn.title = "クリックでルームコードをコピー";
+  roomCodeBtn.addEventListener("click", handlers.onCopyRoomCode);
+  centerHead.append(roomCodeBtn);
+  center.append(centerHead);
   const centerBody = el("div", "panel__body");
 
   const settings = el("div", "settings-grid");
@@ -172,6 +178,20 @@ function renderLobby(vm, handlers) {
   settings.append(el("label", "label", "制限時間(秒)"), timeInput);
   settings.append(el("label", "label", "お題上書き"), topicInput);
 
+  const scoringModeSelect = document.createElement("select");
+  scoringModeSelect.className = "input";
+  scoringModeSelect.disabled = !isHost;
+  const playerMode = document.createElement("option");
+  playerMode.value = "player";
+  playerMode.textContent = "プレイヤー採点";
+  const aiMode = document.createElement("option");
+  aiMode.value = "ai";
+  aiMode.textContent = "AI採点";
+  scoringModeSelect.append(playerMode, aiMode);
+  scoringModeSelect.value = vm.ui.scoringModeDraft ?? room.settings.scoringMode ?? "player";
+  scoringModeSelect.addEventListener("change", (event) => handlers.onChangeUi("scoringModeDraft", event.target.value));
+  settings.append(el("label", "label", "採点モード"), scoringModeSelect);
+
   const actionRow = el("div", "actions-row");
   if (isHost) {
     const applyBtn = el("button", "btn btn--secondary", "設定保存");
@@ -188,7 +208,7 @@ function renderLobby(vm, handlers) {
   rightPanel.append(el("div", "panel__head", "ガイド"));
   const rightBody = el("div", "panel__body");
   rightBody.append(el("p", "help", "2〜8人推奨。投稿は時間内に何度でも上書きできます。"));
-  rightBody.append(el("p", "help", "採点は4軸で各1位を選択。自分には投票できません。"));
+  rightBody.append(el("p", "help", "採点モード: プレイヤー採点 / AI採点 を選択できます。"));
   rightPanel.append(rightBody);
 
   shell.append(leftPanel, center, rightPanel);
@@ -206,11 +226,18 @@ function renderRound(vm, handlers) {
 
   const body = el("div", "panel__body");
   body.append(el("div", "topic-box", round.topicText));
-  body.append(el("p", "help", `提出済み: ${submittedCount}/${room.players.length}`));
-  body.append(el("p", "help", `残り時間: ${vm.roundTick.remainingSec ?? "--"}秒`));
+  const submittedLine = el("p", "help", `提出済み: ${submittedCount}/${room.players.length}`);
+  submittedLine.dataset.role = "submitted-count";
+  body.append(submittedLine);
+  const timerLine = el("p", "help");
+  const timerValue = el("span", "", String(vm.roundTick.remainingSec ?? "--"));
+  timerValue.dataset.role = "remaining-sec";
+  timerLine.append("残り時間: ", timerValue, "秒");
+  body.append(timerLine);
 
   const textarea = document.createElement("textarea");
   textarea.className = "input textarea";
+  textarea.dataset.role = "submission-input";
   textarea.maxLength = 280;
   textarea.placeholder = "コメントを入力 (280文字以内)";
   textarea.value = vm.ui.submissionText;
@@ -224,7 +251,7 @@ function renderRound(vm, handlers) {
   if (meSubmission?.submittedAt) {
     const status = el("div", `submission-status ${meSubmission.isDisqualified ? "is-dq" : ""}`);
     status.textContent = meSubmission.isDisqualified
-      ? `失格判定: ${meSubmission.dqReason}`
+      ? "失格判定済み。公開時は本文がマスクされます。"
       : "投稿済み (時間内は再編集可)";
     body.append(status);
   }
@@ -242,6 +269,7 @@ function renderRound(vm, handlers) {
 function renderReveal(vm, handlers) {
   const room = vm.room;
   const round = room.activeRound;
+  const isAiMode = room.settings.scoringMode === "ai";
 
   const panel = el("section", "panel");
   panel.append(el("div", "panel__head", `Round ${round.roundNo} / REVEAL`));
@@ -269,8 +297,8 @@ function renderReveal(vm, handlers) {
   body.append(list);
 
   if (vm.you.isHost) {
-    const nextBtn = el("button", "btn btn--primary", "採点フェーズへ");
-    nextBtn.addEventListener("click", handlers.onStartScoring);
+    const nextBtn = el("button", "btn btn--primary", isAiMode ? "AI採点して結果へ" : "採点フェーズへ");
+    nextBtn.addEventListener("click", isAiMode ? handlers.onRunAiScoring : handlers.onStartScoring);
     body.append(nextBtn);
   } else {
     body.append(el("p", "help", "ホストの進行を待っています..."));
@@ -283,48 +311,132 @@ function renderReveal(vm, handlers) {
 function renderScore(vm, handlers) {
   const room = vm.room;
   const round = room.activeRound;
+  if (room.settings.scoringMode === "ai") {
+    const panel = el("section", "panel");
+    panel.append(el("div", "panel__head", `Round ${round.roundNo} / AI SCORING`));
+    const body = el("div", "panel__body");
+    body.append(el("p", "help", "AI採点モードです。ホストがAI採点を実行すると結果へ進みます。"));
+    panel.append(body);
+    return panel;
+  }
 
   const panel = el("section", "panel");
   panel.append(el("div", "panel__head", `Round ${round.roundNo} / SCORING`));
   const body = el("div", "panel__body");
 
-  const votingTargets = round.submissions.filter((submission) => {
-    if (submission.playerId === vm.you.id) return false;
-    if (submission.isDisqualified) return false;
+  const submissionByPlayerId = Object.fromEntries(
+    round.submissions.map((submission) => [submission.playerId, submission]),
+  );
+  const votingTargets = room.players.filter((player) => {
+    if (player.id === vm.you.id) return false;
+    if (submissionByPlayerId[player.id]?.isDisqualified) return false;
     return true;
   });
+  const isTwoPlayerMode = room.players.length === 2 && votingTargets.length === 1;
+  const nonHostVotedCount = round.nonHostVotedCount || 0;
+  const nonHostTotal = Math.max(0, room.players.length - 1);
+  const hostLocked = vm.you?.isHost && nonHostVotedCount < nonHostTotal;
 
   body.append(el("p", "help", `投票完了: ${round.votedCount || 0}/${round.totalVoters || room.players.length}`));
+  if (vm.you?.isHost) {
+    body.append(el("p", "help", `メンバー投票: ${nonHostVotedCount}/${nonHostTotal}`));
+  }
+  if (hostLocked) {
+    body.append(el("p", "help", "ホストはメンバー全員の投票完了後に投票できます。"));
+  }
+  if (votingTargets.length === 0) {
+    body.append(el("p", "help", "投票対象がいないため、このラウンドは投票スキップになります。"));
+  }
 
-  AXES.forEach((axis) => {
-    const field = el("div", "field");
-    field.append(el("label", "label", `${axis.label} (1位を選択)`));
-
-    const select = document.createElement("select");
-    select.className = "input";
-
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = "選択してください";
-    select.append(placeholder);
-
-    votingTargets.forEach((submission, index) => {
-      const option = document.createElement("option");
-      option.value = submission.playerId;
-      const player = room.players.find((p) => p.id === submission.playerId);
-      option.textContent = room.settings.anonymous
-        ? `Player ${index + 1}`
-        : player?.name || submission.playerId;
-      select.append(option);
-    });
-
-    select.value = vm.ui.votesDraft[axis.key] || "";
-    select.addEventListener("change", (event) => handlers.onVoteDraft(axis.key, event.target.value));
-    field.append(select);
-    body.append(field);
+  body.append(el("h3", "result-subhead", "投稿一覧（確認しながら採点）"));
+  const scoreSubmissionGrid = el("div", "submission-grid");
+  round.submissions.forEach((submission) => {
+    const player = room.players.find((p) => p.id === submission.playerId);
+    const card = el("article", "submission-card");
+    card.append(el("div", "submission-card__head", player?.name || submission.playerId));
+    if (submission.isDisqualified) {
+      const masked = el("div", "dq-mask", "ライン越えで失格 (本文非表示)");
+      const reason = el("div", "help", submission.dqReason || "規約違反");
+      card.append(masked, reason);
+    } else {
+      card.append(el("div", "submission-card__text", submission.text || "(未提出)"));
+    }
+    scoreSubmissionGrid.append(card);
   });
+  body.append(scoreSubmissionGrid);
 
-  const submitVotesBtn = el("button", "btn btn--primary", "投票を送信");
+  if (votingTargets.length > 0) {
+    AXES.forEach((axis) => {
+      const field = el("div", "field axis-score-row");
+      field.append(el("label", "label", `${axis.label}`));
+
+      if (isTwoPlayerMode) {
+        const opponent = votingTargets[0];
+        const targetName = opponent.name || opponent.id;
+        const targetFixed = el("div", "input input--readonly", targetName);
+        field.append(targetFixed);
+
+        const starSelect = document.createElement("select");
+        starSelect.className = "input";
+        const starPlaceholder = document.createElement("option");
+        starPlaceholder.value = "";
+        starPlaceholder.textContent = "星を選択";
+        starSelect.append(starPlaceholder);
+        [1, 2, 3, 4, 5].forEach((star) => {
+          const option = document.createElement("option");
+          option.value = String(star);
+          option.textContent = `${"★".repeat(star)} (${star})`;
+          starSelect.append(option);
+        });
+        starSelect.value = vm.ui.votesDraft[axis.key]?.stars ? String(vm.ui.votesDraft[axis.key]?.stars) : "";
+        starSelect.addEventListener("change", (event) =>
+          handlers.onVoteDraft(axis.key, { stars: Number(event.target.value), submissionPlayerId: opponent.id }),
+        );
+        field.append(starSelect);
+      } else {
+        const targetSelect = document.createElement("select");
+        targetSelect.className = "input";
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "プレイヤーを選択";
+        targetSelect.append(placeholder);
+
+        votingTargets.forEach((player, index) => {
+          const option = document.createElement("option");
+          option.value = player.id;
+          option.textContent = player.name || player.id;
+          targetSelect.append(option);
+        });
+
+        targetSelect.value = vm.ui.votesDraft[axis.key]?.submissionPlayerId || "";
+        targetSelect.addEventListener("change", (event) =>
+          handlers.onVoteDraft(axis.key, { submissionPlayerId: event.target.value }),
+        );
+        const starSelect = document.createElement("select");
+        starSelect.className = "input";
+        const starPlaceholder = document.createElement("option");
+        starPlaceholder.value = "";
+        starPlaceholder.textContent = "星を選択";
+        starSelect.append(starPlaceholder);
+        [1, 2, 3, 4, 5].forEach((star) => {
+          const option = document.createElement("option");
+          option.value = String(star);
+          option.textContent = `${"★".repeat(star)} (${star})`;
+          starSelect.append(option);
+        });
+        starSelect.value = vm.ui.votesDraft[axis.key]?.stars ? String(vm.ui.votesDraft[axis.key]?.stars) : "";
+        starSelect.addEventListener("change", (event) =>
+          handlers.onVoteDraft(axis.key, { stars: Number(event.target.value) }),
+        );
+
+        field.append(targetSelect, starSelect);
+      }
+      body.append(field);
+    });
+  }
+
+  const submitVotesBtn = el("button", "btn btn--primary", votingTargets.length === 0 ? "投票をスキップ" : "投票を送信");
   submitVotesBtn.addEventListener("click", handlers.onSubmitVotes);
   body.append(submitVotesBtn);
 
@@ -346,12 +458,7 @@ function buildRanking(vm) {
   return room.players
     .map((player) => {
       const score = scores[player.id] || {
-        axisScores: {
-          NORM_CHALLENGE: 0,
-          LOGIC_LEAP: 0,
-          EMOTION_STIM: 0,
-          ARTISTRY: 0,
-        },
+        axisScores: Object.fromEntries(AXES.map((axis) => [axis.key, 0])),
         total: 0,
         isDisqualified: false,
         dqReason: null,
@@ -364,6 +471,30 @@ function buildRanking(vm) {
     .sort((a, b) => b.score.total - a.score.total);
 }
 
+function buildTotalRanking(vm) {
+  const room = vm.room;
+  const summary = Object.fromEntries(
+    room.players.map((player) => [player.id, { total: 0 }]),
+  );
+
+  room.rounds.forEach((round) => {
+    const byPlayer = round?.scoresComputed?.bySubmissionPlayerId || {};
+    Object.entries(byPlayer).forEach(([playerId, score]) => {
+      if (!summary[playerId]) {
+        summary[playerId] = { total: 0 };
+      }
+      summary[playerId].total += Number(score?.total || 0);
+    });
+  });
+
+  return room.players
+    .map((player) => ({
+      player,
+      total: summary[player.id]?.total || 0,
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
 function renderResult(vm, handlers) {
   const room = vm.room;
   const round = room.activeRound;
@@ -373,7 +504,38 @@ function renderResult(vm, handlers) {
   panel.append(el("div", "panel__head", `Round ${round.roundNo} / RESULT`));
 
   const body = el("div", "panel__body");
+  if (round?.scoresComputed?.judgedBy === "ai") {
+    body.append(el("p", "help", "このラウンドは AI 採点で評価されています。"));
+    if (round?.scoresComputed?.judgedByModel) {
+      body.append(el("p", "help", `AIモデル: ${round.scoresComputed.judgedByModel}`));
+    }
+  }
+
+  body.append(el("h3", "result-subhead", "お題と回答"));
+  body.append(el("div", "topic-box", round.topicText || "(お題なし)"));
+  const answers = el("div", "submission-grid");
+  round.submissions.forEach((submission) => {
+    const player = room.players.find((p) => p.id === submission.playerId);
+    const card = el("article", "submission-card");
+    card.append(el("div", "submission-card__head", player?.name || submission.playerId));
+    if (submission.isDisqualified) {
+      const details = document.createElement("details");
+      details.className = "submission-dq-details";
+      const summary = document.createElement("summary");
+      summary.textContent = "ライン越え（クリックで内容を表示）";
+      const content = el("div", "submission-card__text");
+      content.textContent = submission.text || "(本文なし)";
+      details.append(summary, content);
+      card.append(details);
+    } else {
+      card.append(el("div", "submission-card__text", submission.text || "(未提出)"));
+    }
+    answers.append(card);
+  });
+  body.append(answers);
+
   const table = el("div", "result-table");
+  const isFinalRound = room.currentRoundNo >= room.settings.roundCount;
 
   ranking.forEach(({ player, score }, index) => {
     const row = el("div", `result-row ${score.isDisqualified ? "is-dq" : ""}`);
@@ -384,22 +546,42 @@ function renderResult(vm, handlers) {
       row.append(el("div", "result-axis", `${axis.label}: ${score.axisScores?.[axis.key] ?? 0}`));
     });
 
-    const totalLabel = score.isDisqualified
-      ? "失格 (0点)"
-      : `合計: ${score.total}`;
+    const totalLabel = score.isDisqualified ? "失格 (0★)" : `合計: ${score.total}★`;
     row.append(el("div", "result-total", totalLabel));
     table.append(row);
+    if (score.aiComment) {
+      const comment = el("div", "help", `AIの講評: ${score.aiComment}`);
+      comment.style.margin = "0 0 8px 42px";
+      table.append(comment);
+    }
   });
 
   body.append(table);
 
+  if (isFinalRound) {
+    const totalHead = el("h3", "result-subhead", "総合結果（全ラウンド合計★）");
+    const totalTable = el("div", "result-table");
+    const totalRanking = buildTotalRanking(vm);
+    totalRanking.forEach((item, index) => {
+      const row = el("div", "result-row result-row--summary");
+      row.append(el("div", "result-rank", String(index + 1)));
+      row.append(el("div", "result-name", item.player.name));
+      row.append(el("div", "result-total", `${item.total}★`));
+      totalTable.append(row);
+    });
+    body.append(totalHead, totalTable);
+  }
+
   if (vm.you.isHost) {
-    if (room.currentRoundNo < room.settings.roundCount) {
+    if (!isFinalRound) {
       const nextBtn = el("button", "btn btn--primary", "次ラウンドへ");
       nextBtn.addEventListener("click", handlers.onNextRound);
       body.append(nextBtn);
     } else {
       body.append(el("p", "help", "最終ラウンドが完了しました。"));
+      const backBtn = el("button", "btn btn--secondary", "ルームロビーへ戻る");
+      backBtn.addEventListener("click", handlers.onBackToLobby);
+      body.append(backBtn);
     }
   } else {
     body.append(el("p", "help", "ホストの進行を待っています..."));

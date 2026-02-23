@@ -111,6 +111,20 @@ body {
   font-weight: 600;
 }
 
+.room-code-btn {
+  border: 1px solid var(--c-border);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--c-text);
+  border-radius: 10px;
+  padding: 4px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.room-code-btn:hover {
+  background: rgba(124, 92, 255, 0.2);
+}
+
 .panel__body {
   padding: 16px;
 }
@@ -142,6 +156,13 @@ body {
   background: rgba(255, 255, 255, 0.06);
   color: var(--c-text);
   padding: 10px 12px;
+}
+
+.input--readonly {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  opacity: 0.9;
 }
 
 .textarea {
@@ -284,6 +305,11 @@ body {
   margin-bottom: 14px;
 }
 
+.axis-score-row {
+  grid-template-columns: 1fr 180px 180px;
+  align-items: center;
+}
+
 .submission-card {
   border: 1px solid var(--c-border);
   border-radius: var(--r-2);
@@ -301,6 +327,29 @@ body {
   white-space: pre-wrap;
   font-size: 14px;
   line-height: 1.45;
+}
+
+.submission-dq-details {
+  border: 1px dashed rgba(249, 112, 102, 0.7);
+  border-radius: var(--r-1);
+  padding: 8px;
+  background: rgba(249, 112, 102, 0.08);
+}
+
+.submission-dq-details > summary {
+  color: var(--c-danger);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.submission-dq-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.submission-dq-details[open] > summary {
+  margin-bottom: 8px;
 }
 
 .dq-mask {
@@ -343,6 +392,15 @@ body {
   font-weight: 600;
 }
 
+.result-subhead {
+  margin: 16px 0 8px;
+  font-size: 15px;
+}
+
+.result-row--summary {
+  grid-template-columns: 34px 1fr 100px;
+}
+
 .toasts {
   position: fixed;
   right: 16px;
@@ -371,6 +429,10 @@ body {
 
 @media (max-width: 1060px) {
   .shell--game {
+    grid-template-columns: 1fr;
+  }
+
+  .axis-score-row {
     grid-template-columns: 1fr;
   }
 

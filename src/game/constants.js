@@ -1,8 +1,6 @@
 ﻿export const AXES = [
-  { key: "NORM_CHALLENGE", label: "規範への挑戦" },
-  { key: "LOGIC_LEAP", label: "論理飛躍" },
-  { key: "EMOTION_STIM", label: "感情の刺激" },
-  { key: "ARTISTRY", label: "芸術点" },
+  { key: "ARTISTRY", label: "芸術性" },
+  { key: "LINE_CROSSING", label: "ライン越え度" },
 ];
 
 export const AXIS_KEYS = AXES.map((axis) => axis.key);
@@ -11,17 +9,30 @@ export const DEFAULT_SETTINGS = {
   roundCount: 3,
   timeLimitSec: 60,
   anonymous: true,
+  scoringMode: "player",
 };
 
 export const FIXED_TOPICS = [
-  "炎上しそうな新しい学校ルールを提案して",
-  "全員がモヤっとするが妙に納得してしまう言い訳を書いて",
-  "会議を最速で荒らす一言を、詩的に表現して",
-  "謝罪文なのに火に油を注ぐ一文を作って",
-  "一見善意だがコメント欄を地獄にする提案をして",
-  "絶妙に論点をずらして空気を壊すコメントを書いて",
-  "誰も求めていない正論パンチを放って",
-  "場を凍らせるけど語彙だけは美しい一文を書いて",
+  "残業は努力の証。若手はまず量をこなすべき",
+  "既読スルーは失礼。24時間以内に全員返信すべき",
+  "会議は長いほど本気度が伝わる",
+  "匿名の意見は無価値。実名だけ信用する",
+  "節約したいなら交際費を全部ゼロにすればいい",
+  "失敗する人は準備不足。環境のせいにするな",
+  "休む人ほど体調管理が甘いだけ",
+  "趣味は収益化できないなら時間の無駄",
+  "AIに任せれば人の創造性はもう不要",
+  "正論なら言い方は気にしなくていい",
+  "きょうはいい天気だなあ",
+  "このツイート面白スギィ！",
+  "コンビニの新作スイーツ、今日は当たりだった",
+  "月曜日の朝、コーヒーが命綱",
+  "電車で席を譲ってもらって少し救われた",
+  "猫の動画を見てたら一日が終わった",
+  "通知ゼロの日、逆に落ち着く説",
+  "冷蔵庫を開けた瞬間に何を取りに来たか忘れる",
+  "今さらだけどこのミーム、語感が強すぎる",
+  "寝る前に5分だけのはずが延々スクロールしてる",
 ];
 
 export const STATUS = {
@@ -33,7 +44,10 @@ export const STATUS = {
   ENDED: "ended",
 };
 
-export const SCORE_PER_VOTE = 10;
+export const STAR = {
+  MIN: 1,
+  MAX: 5,
+};
 
 export const PLAYER_LIMIT = {
   MIN: 2,
