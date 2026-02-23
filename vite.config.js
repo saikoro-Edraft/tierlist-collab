@@ -1,11 +1,9 @@
+// vite.config.js
 import { defineConfig } from "vite";
 
+const isRender = process.env.RENDER === "true";
+
 export default defineConfig({
-  // GitHub Pages (project pages) URL:
-  // https://just1ssue.github.io/tierlist-collab/
-  base: "/tierlist-collab/",
-  server: {
-    // Quick Tunnel (trycloudflare.com) からのアクセスを許可
-    allowedHosts: true,
-  },
+  base: isRender ? "/" : "/tierlist-collab/",
+  server: { allowedHosts: true },
 });
